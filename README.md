@@ -404,3 +404,4 @@ A detailed comparison of this tool’s data-prep steps with those in DeepVirFind
 
 - NCBI rate limits apply; the download and snapshot steps add short delays between requests. Failed fetches are retried up to 3 times with backoff.
 - Genome selection uses RefSeq and length filters; edit `DEFAULT_QUERIES` in `ncbi_search.py` to change criteria (used by both `download` and `snapshot`).
+- For local runs and outputs, use a dedicated working directory; see `working_directory/README.md`.
