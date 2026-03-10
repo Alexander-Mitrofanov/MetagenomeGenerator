@@ -41,7 +41,7 @@ export ENTREZ_API_KEY="your_ncbi_api_key"
 
 ## Usage
 
-After installation, use the `metagenome-generator` command (or `python -m metagenome_generator`). From the repo root you can also run `python main.py`. Subcommands: `download`, `snapshot`, `chunk`, `pipeline`, `blastn-filter`, `seeker`, `temporal-split`.
+After installation, use the `metagenome-generator` command (or `python -m metagenome_generator`). From the repo root you can also run `python main.py`. Subcommands: `download`, `snapshot`, `migrate-snapshot`, `chunk`, `pipeline`, `blastn-filter`, `seeker`, `temporal-split`, `temporal-split-info`.
 
 **Keep the project clean:** use a dedicated **working directory** for all outputs and run data (e.g. `working_directory/`). It is gitignored. See [working_directory/README.md](working_directory/README.md) for layout and examples.
 
@@ -57,46 +57,82 @@ metagenome-generator chunk --input working_directory/downloaded --output metagen
 
 Catalog **all** bacterial, viral, archaeal, and plasmid accession IDs that match the project’s RefSeq + complete-genome criteria—**without downloading any sequences**. Only presence in the NCBI database is recorded. Output is written to the **`snapshots/`** folder. By default the filename includes the run date: `snapshots/accession_snapshot_YYYY-MM-DD.json`. You can then subset or edit that file and pass it to `download` or `pipeline` via `--accessions-file`.
 
-The tool uses NCBI’s History server and paging (10,000 UIDs per request) to retrieve full result sets. A **local UTC timestamp** is stored; NCBI does not provide a database “as of” date. Optionally, nucleotide DB metadata (e.g. record count) is fetched via `einfo`. By default, **per-accession metadata** is also fetched via NCBI `esummary`: **CreateDate** (YYYY/MM/DD) and **Title** (genome description, i.e. the FASTA header text). These are stored under the `accession_metadata` key in the snapshot JSON. `temporal-split` can then use this data and skip a second NCBI round-trip. Use `--no-metadata` for a faster snapshot if you do not need dates or headers.
+The tool uses NCBI’s History server and paging (10,000 UIDs per request) to retrieve full result sets. A **local UTC timestamp** is stored; NCBI does not provide a database “as of” date. By default the snapshot fetches **CreateDate** and **Title** for every ID via `esummary` and stores them **per category** (each accession appears as `{accession, create_date, title}` inside `bacterial`, `viral`, `archaea`, `plasmid`). Use **`--no-metadata`** to store only ID lists (no dates/titles).
 
 ```bash
 metagenome-generator snapshot
 # or: metagenome-generator snapshot --output snapshots/my_snapshot.json
-# Skip per-accession metadata (faster): metagenome-generator snapshot --no-metadata
+# Lists only (no CreateDate/title): metagenome-generator snapshot --no-metadata
 ```
 
-**Snapshot JSON format:** In addition to `timestamp`, `bacterial`, `viral`, `archaea`, `plasmid`, the file may contain `accession_metadata`: a dict mapping each accession to `{"create_date": "YYYY/MM/DD", "title": "..."}` (NCBI CreateDate and genome title/header).
+**Snapshot JSON format:** `timestamp` plus four categories: `bacterial`, `viral`, `archaea`, `plasmid`. With metadata (default), each category is a list of objects: `{"accession": "...", "create_date": "YYYY/MM/DD", "title": "..."}`. With `--no-metadata`, each category is a list of accession ID strings. Legacy snapshots with a top-level `accession_metadata` dict (or `ncbi_db_info`) are still read by `download` and `temporal-split`. To convert an existing file to the new format without re-downloading, run: **`metagenome-generator migrate-snapshot snapshots/accession_snapshot_YYYY-MM-DD.json`**.
+
+**Counts:** The log line “Stored metadata for 133,445 accessions” is the number of **unique** accessions (some IDs can appear in more than one category, e.g. plasmid + bacterial). The four category arrays together have 133,454 entries (33,089 + 8,324 + 460 + 91,581); the difference (9) is duplicates. So the snapshot does contain all accessions; if you see a smaller number (e.g. ~55k), it may be from viewing only part of the file or one category.
 
 | Argument | Description | Default |
 |----------|-------------|---------|
 | `--output` | Output JSON path | `snapshots/accession_snapshot_YYYY-MM-DD.json` (run date) |
-| `--no-db-info` | Do not fetch NCBI nucleotide db metadata (einfo) | off |
-| `--no-metadata` | Do not fetch CreateDate and title per accession (faster snapshot) | off |
+| `--no-metadata` | Do not fetch CreateDate and title per accession (lists only) | off |
 | `--metadata-batch-size` | esummary batch size when fetching metadata | 500 |
 
 **Typical workflow:** Run `snapshot` once (or periodically). Each run creates a date-stamped file (e.g. `snapshots/accession_snapshot_2026-03-10.json`). Edit the JSON to keep a subset of accessions if needed, then run `download --accessions-file snapshots/accession_snapshot_2026-03-10.json` (or the same with `pipeline`) to build from that catalog.
 
 ### Temporal train/test split (by NCBI CreateDate)
 
-To align with **DeepVirFinder**- or **VirFinder**-style evaluation (train on sequences “discovered” before a date, test on those added on or after), use the `temporal-split` subcommand. It reads an accessions JSON (e.g. from `snapshot`). If the file contains **accession_metadata** (CreateDate and title from `snapshot`), it uses that and skips NCBI; otherwise it fetches CreateDate via `esummary`. It writes two JSONs: **train** (CreateDate &lt; split-date) and **test** (CreateDate ≥ split-date). Both files are valid for `download --accessions-file`.
+To align with **DeepVirFinder**- or **VirFinder**-style evaluation (train on sequences “discovered” before a date, test on those added on or after), run **`temporal-split-info`** first to see how many accessions fall into train vs test for a given date—then run **`temporal-split`** to write the two JSONs.
+
+**1. Preview train/test counts (no files written):**
+
+```bash
+metagenome-generator temporal-split-info \
+  --accessions-file snapshots/accession_snapshot_2026-03-10.json \
+  --split-date 2019-06-01
+```
+
+Example output:
+
+```
+Using CreateDate from snapshot metadata for 133,445 accessions.
+
+Temporal split preview (split date: 2019-06-01)
+  Source: snapshots/accession_snapshot_2026-03-10.json
+  Snapshot timestamp: 2026-03-10T20:25:51Z
+
+  Category   |   Total |   Train |    Test | Train % | Test %
+  -----------+---------+---------+---------+---------+--------
+  bacterial   |  33,089 |   6,942 |  26,147 |   21.0% |  79.0%
+  viral       |   8,324 |   4,963 |   3,361 |   59.6% |  40.4%
+  archaea     |     460 |     135 |     325 |   29.3% |  70.7%
+  plasmid     |  91,581 |  20,322 |  71,259 |   22.2% |  77.8%
+  -----------+---------+---------+---------+---------+--------
+  Total       | 133,454 |  32,362 | 101,092 |   24.2% |  75.8%
+
+  Train = CreateDate < split date (older entries)
+  Test  = CreateDate >= split date (newer entries)
+
+  Run 'temporal-split' with this --split-date to write train/test JSONs.
+```
+
+**2. Write train and test accession JSONs:**
 
 ```bash
 metagenome-generator temporal-split \
   --accessions-file snapshots/accession_snapshot_2026-03-10.json \
-  --split-date 2015-05-01
+  --split-date 2019-06-01
 ```
 
-By default this writes `train_<basename>.json` and `test_<basename>.json` next to the input file. Use `--output-train` and `--output-test` to set paths. Then run download (or pipeline) twice with the train and test JSONs to build separate train/test genome sets.
+By default this writes `train_<basename>.json` and `test_<basename>.json` next to the input file. Use `--output-train` and `--output-test` to set paths. Then run download (or pipeline) with each JSON to build separate train/test genome sets.
 
-| Argument | Description |
-|----------|-------------|
+| Command / argument | Description |
+|--------------------|-------------|
+| **temporal-split-info** | Show train/test counts per category and total (no files written). Use before `temporal-split` to choose a date. |
 | `--accessions-file` | Input JSON with bacterial, viral, archaea, plasmid lists (e.g. from `snapshot`) |
-| `--split-date` | Cutoff date **YYYY-MM-DD** (e.g. `2015-05-01`). Train = CreateDate &lt; date, test = ≥ date |
+| `--split-date` | Cutoff date **YYYY-MM-DD** (e.g. `2019-06-01`). Train = CreateDate &lt; date, test = ≥ date |
 | `--output-train` | Path for train accessions JSON (default: same dir as input, `train_<basename>.json`) |
 | `--output-test` | Path for test accessions JSON (default: same dir as input, `test_<basename>.json`) |
-| `--batch-size` | NCBI esummary batch size (default: 200) |
+| `--batch-size` | NCBI esummary batch size when metadata not in snapshot (default: 200 / 500 for info) |
 
-Requires `ENTREZ_EMAIL` (and optionally `ENTREZ_API_KEY`) for NCBI rate limits.
+Requires `ENTREZ_EMAIL` (and optionally `ENTREZ_API_KEY`) for NCBI rate limits when CreateDate is not already in the snapshot.
 
 ### Download genomes only
 
@@ -369,7 +405,7 @@ This pipeline supports:
 | BLASTN to remove endogenous viral elements | **Built-in:** `blastn-filter` subcommand (or `pipeline --run-blastn-filter`). Non-viral vs viral BLASTN; chunks overlapping hits are excluded via `chunk --eve-intervals`. |
 | Similarity filtering (e.g. 90% max) | **Built-in:** `chunk --filter-similar` (or `pipeline --filter-similar`). Oversample, drop chunks similar to already-kept (BLASTN), refill; warnings in log if target not reached. |
 | Train-test split (no similarity overlap) | **Built-in:** `chunk --train-test-split PCT` (or `pipeline --train-test-split PCT`). Split by percentage; remove from test any sequence ≥ threshold similar to train (`--train-test-similarity-threshold`). |
-| Temporal train/test split (by NCBI CreateDate) | **Built-in:** `temporal-split` subcommand. Split accessions into train (CreateDate &lt; date) and test (≥ date); output two JSONs for use with `download --accessions-file`. Uses `accession_metadata` from snapshot when present. |
+| Temporal train/test split (by NCBI CreateDate) | **Built-in:** `temporal-split` subcommand. Split accessions into train (CreateDate &lt; date) and test (≥ date); output two JSONs for use with `download --accessions-file`. Uses per-accession CreateDate from snapshot when present (per-category or legacy format). |
 
 Realm-level viral taxonomy (RefSeq) can be approximated by refining the viral query in `ncbi_search.py` (e.g. by taxon name or using NCBI’s taxonomy filters).
 

@@ -33,6 +33,69 @@ ACCESSIONS_KEY_PLASMID = "plasmid"
 # Optional: per-accession metadata (create_date, title) from NCBI esummary
 ACCESSION_METADATA_KEY = "accession_metadata"
 
+# Category keys in order (bacterial, viral, archaea, plasmid)
+ACCESSIONS_CATEGORY_KEYS = (
+    ACCESSIONS_KEY_BACTERIAL,
+    ACCESSIONS_KEY_VIRAL,
+    ACCESSIONS_KEY_ARCHAEA,
+    ACCESSIONS_KEY_PLASMID,
+)
+
+
+def _category_value_to_id_list(value: list) -> list[str]:
+    """Normalize a category value to a list of accession ID strings.
+
+    Supports: list of strings (legacy) or list of dicts with 'accession' key (new format).
+    """
+    if not value:
+        return []
+    first = value[0]
+    if isinstance(first, str):
+        return list(value)
+    if isinstance(first, dict) and "accession" in first:
+        return [item["accession"] for item in value if isinstance(item, dict) and item.get("accession")]
+    return []
+
+
+def get_accession_lists_from_data(data: dict) -> tuple[list[str], list[str], list[str], list[str]]:
+    """Extract (bacterial, viral, archaea, plasmid) ID lists from loaded snapshot/accessions JSON.
+
+    Handles both legacy format (category = list of ID strings) and new format
+    (category = list of {accession, create_date, title}).
+    """
+    return (
+        _category_value_to_id_list(data.get(ACCESSIONS_KEY_BACTERIAL, [])),
+        _category_value_to_id_list(data.get(ACCESSIONS_KEY_VIRAL, [])),
+        _category_value_to_id_list(data.get(ACCESSIONS_KEY_ARCHAEA, [])),
+        _category_value_to_id_list(data.get(ACCESSIONS_KEY_PLASMID, [])),
+    )
+
+
+def get_accession_metadata_from_data(data: dict) -> dict[str, dict]:
+    """Extract accession -> {create_date, title} from loaded JSON.
+
+    Uses top-level accession_metadata if present (legacy), otherwise builds from
+    per-category list of objects (new format: each item has accession, create_date, title).
+    """
+    legacy = data.get(ACCESSION_METADATA_KEY)
+    if isinstance(legacy, dict) and legacy:
+        return dict(legacy)
+    result: dict[str, dict] = {}
+    for key in ACCESSIONS_CATEGORY_KEYS:
+        value = data.get(key, [])
+        if not value:
+            continue
+        first = value[0] if value else None
+        if isinstance(first, dict) and "accession" in first:
+            for item in value:
+                if isinstance(item, dict) and item.get("accession"):
+                    acc = item["accession"]
+                    result[acc] = {
+                        "create_date": item.get("create_date") or "",
+                        "title": item.get("title") or "",
+                    }
+    return result
+
 
 def load_accessions(path: Path) -> dict:
     """Load accession lists and optional metadata from a JSON file.
@@ -118,10 +181,7 @@ def download_genomes(
 
     if accessions_file is not None:
         data = load_accessions(accessions_file)
-        bacterial_ids = data.get(ACCESSIONS_KEY_BACTERIAL, [])
-        viral_ids = data.get(ACCESSIONS_KEY_VIRAL, [])
-        archaea_ids = data.get(ACCESSIONS_KEY_ARCHAEA, [])
-        plasmid_ids = data.get(ACCESSIONS_KEY_PLASMID, [])
+        bacterial_ids, viral_ids, archaea_ids, plasmid_ids = get_accession_lists_from_data(data)
         ts = data.get(ACCESSIONS_KEY_TIMESTAMP, "unknown")
         print(f"Using accessions from {accessions_file} (timestamp: {ts})")
         print(f"  Bacterial: {len(bacterial_ids)}, viral: {len(viral_ids)}, archaea: {len(archaea_ids)}, plasmid: {len(plasmid_ids)}")

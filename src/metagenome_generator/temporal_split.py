@@ -22,12 +22,13 @@ Entrez.email = os.environ.get("ENTREZ_EMAIL", "your_email@example.com")
 Entrez.api_key = os.environ.get("ENTREZ_API_KEY")
 
 from .download_genomes import (
-    ACCESSION_METADATA_KEY,
     ACCESSIONS_KEY_ARCHAEA,
     ACCESSIONS_KEY_BACTERIAL,
     ACCESSIONS_KEY_PLASMID,
     ACCESSIONS_KEY_TIMESTAMP,
     ACCESSIONS_KEY_VIRAL,
+    get_accession_lists_from_data,
+    get_accession_metadata_from_data,
     load_accessions,
 )
 
@@ -96,7 +97,9 @@ def fetch_accession_metadata(
                 create_date = _parse_create_date(rec)
                 title = _parse_title(rec)
                 result[acc] = {"create_date": create_date or "", "title": title}
-        if progress_callback and (batch_idx + 1) % 10 == 0:
+        if progress_callback and (
+            (batch_idx + 1) % 5 == 0 or (batch_idx + 1) == total_batches
+        ):
             progress_callback(batch_idx + 1, total_batches, len(result))
     return result
 
@@ -180,6 +183,103 @@ def _validate_split_date(s: str) -> None:
         raise ValueError(f"split_date must be YYYY-MM-DD, got: {s!r}") from e
 
 
+def run_temporal_split_info(
+    accessions_file: Path,
+    split_date: str,
+    *,
+    batch_size: int = ESUMMARY_BATCH_SIZE,
+    verbose: bool = True,
+) -> dict:
+    """Compute and optionally print train/test counts for a temporal split (no files written).
+
+    Returns a dict with: split_date, source, timestamp, categories (bacterial, viral, archaea, plasmid),
+    each with total, train, test, train_pct, test_pct; and totals (total, train, test).
+    """
+    _validate_split_date(split_date)
+    path = Path(accessions_file)
+    data = load_accessions(path)
+    bacterial, viral, archaea, plasmid = get_accession_lists_from_data(data)
+
+    all_ids = list(dict.fromkeys(bacterial + viral + archaea + plasmid))
+    if not all_ids:
+        raise ValueError(f"No accessions found in {path}")
+
+    metadata = get_accession_metadata_from_data(data)
+    if metadata:
+        date_by_id = {
+            acc: m["create_date"]
+            for acc, m in metadata.items()
+            if isinstance(m, dict) and m.get("create_date")
+        }
+        if verbose:
+            print(f"Using CreateDate from snapshot metadata for {len(date_by_id):,} accessions.")
+    else:
+        if verbose:
+            print(f"Fetching CreateDate for {len(all_ids):,} accessions from NCBI (batches of {batch_size})...")
+        date_by_id = fetch_accession_dates(all_ids, batch_size=batch_size)
+
+    missing = len(all_ids) - len(date_by_id)
+    if missing and verbose:
+        print(f"  Note: {missing} accessions had no CreateDate; counted as train.")
+
+    def split_list(ids: list[str]) -> tuple[list[str], list[str]]:
+        return split_ids_by_date(ids, date_by_id, split_date)
+
+    categories = (
+        ("bacterial", bacterial),
+        ("viral", viral),
+        ("archaea", archaea),
+        ("plasmid", plasmid),
+    )
+    rows = []
+    total_all, train_all, test_all = 0, 0, 0
+    for name, ids in categories:
+        train_ids, test_ids = split_list(ids)
+        total = len(ids)
+        train_n, test_n = len(train_ids), len(test_ids)
+        total_all += total
+        train_all += train_n
+        test_all += test_n
+        train_pct = (100.0 * train_n / total) if total else 0
+        test_pct = (100.0 * test_n / total) if total else 0
+        rows.append({
+            "category": name,
+            "total": total,
+            "train": train_n,
+            "test": test_n,
+            "train_pct": train_pct,
+            "test_pct": test_pct,
+        })
+    ts = data.get(ACCESSIONS_KEY_TIMESTAMP, "unknown")
+    result = {
+        "split_date": split_date,
+        "source": str(path.resolve()),
+        "timestamp": ts,
+        "categories": {r["category"]: r for r in rows},
+        "totals": {"total": total_all, "train": train_all, "test": test_all},
+    }
+
+    if verbose:
+        print()
+        print(f"Temporal split preview (split date: {split_date})")
+        print(f"  Source: {path}")
+        print(f"  Snapshot timestamp: {ts}")
+        print()
+        print("  Category   |   Total |   Train |    Test | Train % | Test %")
+        print("  -----------+---------+---------+---------+---------+--------")
+        for r in rows:
+            print(f"  {r['category']:11} | {r['total']:>7,} | {r['train']:>7,} | {r['test']:>7,} | {r['train_pct']:>6.1f}% | {r['test_pct']:>5.1f}%")
+        print("  -----------+---------+---------+---------+---------+--------")
+        print(f"  {'Total':11} | {total_all:>7,} | {train_all:>7,} | {test_all:>7,} | {100.0 * train_all / total_all if total_all else 0:>6.1f}% | {100.0 * test_all / total_all if total_all else 0:>5.1f}%")
+        print()
+        print("  Train = CreateDate < split date (older entries)")
+        print("  Test  = CreateDate >= split date (newer entries)")
+        print()
+        print("  Run 'temporal-split' with this --split-date to write train/test JSONs.")
+
+    return result
+
+
 def run_temporal_split(
     accessions_file: Path,
     split_date: str,
@@ -196,17 +296,14 @@ def run_temporal_split(
     """
     _validate_split_date(split_date)
     data = load_accessions(accessions_file)
-    bacterial = data.get(ACCESSIONS_KEY_BACTERIAL, [])
-    viral = data.get(ACCESSIONS_KEY_VIRAL, [])
-    archaea = data.get(ACCESSIONS_KEY_ARCHAEA, [])
-    plasmid = data.get(ACCESSIONS_KEY_PLASMID, [])
+    bacterial, viral, archaea, plasmid = get_accession_lists_from_data(data)
 
     all_ids = list(dict.fromkeys(bacterial + viral + archaea + plasmid))
     if not all_ids:
         raise ValueError(f"No accessions found in {accessions_file}")
 
-    # Use accession_metadata from snapshot if present (avoids NCBI esummary calls)
-    metadata = data.get(ACCESSION_METADATA_KEY) or {}
+    # Use metadata from snapshot if present (legacy accession_metadata or per-category objects)
+    metadata = get_accession_metadata_from_data(data)
     if metadata:
         date_by_id = {
             acc: m["create_date"]

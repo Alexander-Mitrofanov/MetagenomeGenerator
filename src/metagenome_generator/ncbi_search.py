@@ -9,6 +9,7 @@ and search so both modules stay in sync and avoid duplication.
 import os
 import time
 from pathlib import Path
+from typing import Callable
 
 from Bio import Entrez
 
@@ -54,43 +55,90 @@ def search_genomes(query: str, count: int) -> list[str]:
     return record["IdList"][:count]
 
 
-def search_genomes_all(query: str) -> list[str]:
+def search_genomes_all(
+    query: str,
+    *,
+    progress_callback: Callable[[int, int, int], None] | None = None,
+) -> list[str]:
     """Retrieve all accession IDs matching the query using History server and paging.
 
     NCBI returns at most 10,000 UIDs per esearch request. We use usehistory=y to
     store the result on the server, then page with retstart/retmax to collect
     every ID. Rate-limiting sleep is applied between requests.
+    progress_callback(page_num, total_pages, ids_so_far) is called after each page.
     """
-    time.sleep(0.4)
-    handle = Entrez.esearch(
-        db="nucleotide",
-        term=query,
-        usehistory="y",
-        retmax=0,
-        sort="relevance",
-        idtype="acc",
-    )
-    record = Entrez.read(handle)
-    handle.close()
+    max_initial_retries = 3
+    record = None
+    for init_attempt in range(max_initial_retries):
+        handle = None
+        try:
+            time.sleep(0.4)
+            handle = Entrez.esearch(
+                db="nucleotide",
+                term=query,
+                usehistory="y",
+                retmax=0,
+                sort="relevance",
+                idtype="acc",
+            )
+            record = Entrez.read(handle)
+            break
+        except (RuntimeError, Exception):
+            if handle is not None:
+                try:
+                    handle.close()
+                except Exception:
+                    pass
+            if init_attempt < max_initial_retries - 1:
+                time.sleep(2.0 * (init_attempt + 1))
+                continue
+            raise
+        finally:
+            if handle is not None:
+                try:
+                    handle.close()
+                except Exception:
+                    pass
+    if record is None:
+        return []
     count = int(record["Count"])
     webenv = record["WebEnv"]
     query_key = record["QueryKey"]
     if count == 0:
         return []
 
+    total_pages = (count + ESEARCH_BATCH_SIZE - 1) // ESEARCH_BATCH_SIZE
     all_ids: list[str] = []
-    for start in range(0, count, ESEARCH_BATCH_SIZE):
+    max_page_retries = 3
+    for page_zero in range(total_pages):
+        start = page_zero * ESEARCH_BATCH_SIZE
         time.sleep(0.4)
-        handle = Entrez.esearch(
-            db="nucleotide",
-            term=query,
-            webenv=webenv,
-            query_key=query_key,
-            retstart=start,
-            retmax=ESEARCH_BATCH_SIZE,
-            idtype="acc",
-        )
-        batch = Entrez.read(handle)
-        handle.close()
-        all_ids.extend(batch["IdList"])
+        for attempt in range(max_page_retries):
+            handle = None
+            try:
+                handle = Entrez.esearch(
+                    db="nucleotide",
+                    term=query,
+                    webenv=webenv,
+                    query_key=query_key,
+                    retstart=start,
+                    retmax=ESEARCH_BATCH_SIZE,
+                    idtype="acc",
+                )
+                batch = Entrez.read(handle)
+                all_ids.extend(batch["IdList"])
+                break
+            except (RuntimeError, Exception):
+                if attempt < max_page_retries - 1:
+                    time.sleep(2.0 * (attempt + 1))
+                    continue
+                raise
+            finally:
+                if handle is not None:
+                    try:
+                        handle.close()
+                    except Exception:
+                        pass
+        if progress_callback is not None:
+            progress_callback(page_zero + 1, total_pages, len(all_ids))
     return all_ids

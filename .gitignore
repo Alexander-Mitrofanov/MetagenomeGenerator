@@ -27,8 +27,10 @@ dist/
 output/
 output_*/
 data/
-snapshots/
 working_directory/
+
+# Snapshot run logs (in snapshots/)
+snapshots/*.log
 
 # Local-only docs (not published to the repo)
 docs/

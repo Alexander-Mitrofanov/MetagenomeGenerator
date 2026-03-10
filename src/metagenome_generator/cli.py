@@ -2,20 +2,20 @@
 from __future__ import annotations
 """Unified CLI for the metagenome simulator.
 
-Subcommands: download, snapshot, chunk, pipeline, blastn-filter, seeker, temporal-split.
+Subcommands: download, snapshot, migrate-snapshot, chunk, pipeline, blastn-filter, seeker, temporal-split, temporal-split-info.
 """
 
 import argparse
 import logging
 from pathlib import Path
 
-from .accession_snapshot import get_default_snapshot_path, run_snapshot
+from .accession_snapshot import get_default_snapshot_path, migrate_snapshot_to_categories, run_snapshot
 from .download_genomes import download_genomes
 from .chunk_genomes import build_metagenome, get_file_stats, split_train_test_and_write
 from .seeker_wrapper import SEEKER_MIN_LENGTH, run_seeker
 from .blastn_filter import load_eve_intervals, run_blastn_from_dirs
 from .genome_layout import validate_genome_dir
-from .temporal_split import run_temporal_split
+from .temporal_split import run_temporal_split, run_temporal_split_info
 
 # Organized output layout (pipeline): one root dir with step-based subdirs for easy navigation.
 OUTPUT_DIR_DOWNLOADED = "downloaded"
@@ -83,14 +83,9 @@ def _add_snapshot_subparser(subparsers) -> None:
         help="Output JSON path. Default: snapshots/accession_snapshot_YYYY-MM-DD.json (run date)",
     )
     p.add_argument(
-        "--no-db-info",
-        action="store_true",
-        help="Do not fetch NCBI nucleotide db metadata (einfo).",
-    )
-    p.add_argument(
         "--no-metadata",
         action="store_true",
-        help="Do not fetch CreateDate and title per accession (faster; temporal-split will fetch when needed).",
+        help="Do not fetch CreateDate and title per accession (lists only).",
     )
     p.add_argument(
         "--metadata-batch-size",
@@ -98,7 +93,33 @@ def _add_snapshot_subparser(subparsers) -> None:
         default=500,
         help="Batch size for esummary when fetching per-accession metadata. Default: 500",
     )
+    p.add_argument(
+        "--log",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Write progress log to this file. Default: snapshot_YYYY-MM-DD.log next to the output JSON.",
+    )
     p.set_defaults(func=_run_snapshot)
+
+
+def _add_migrate_snapshot_subparser(subparsers) -> None:
+    p = subparsers.add_parser(
+        "migrate-snapshot",
+        help="Convert a snapshot JSON to category-inline format (metadata per category; removes ncbi_db_info). No re-download.",
+    )
+    p.add_argument(
+        "input",
+        type=Path,
+        metavar="SNAPSHOT_JSON",
+        help="Path to snapshot JSON (legacy format with accession_metadata and/or ncbi_db_info).",
+    )
+    p.set_defaults(func=_run_migrate_snapshot)
+
+
+def _run_migrate_snapshot(args) -> None:
+    migrate_snapshot_to_categories(args.input)
+    print(f"Migrated {args.input} to category-inline format.")
 
 
 def _add_chunk_subparser(subparsers) -> None:
@@ -496,6 +517,43 @@ def _add_temporal_split_subparser(subparsers) -> None:
     p.set_defaults(func=_run_temporal_split)
 
 
+def _add_temporal_split_info_subparser(subparsers) -> None:
+    p = subparsers.add_parser(
+        "temporal-split-info",
+        help="Show train/test counts for a temporal split by date (no files written). Use before running temporal-split.",
+    )
+    p.add_argument(
+        "--accessions-file",
+        type=Path,
+        required=True,
+        metavar="PATH",
+        help="Input JSON with bacterial, viral, archaea, plasmid lists (e.g. from snapshot).",
+    )
+    p.add_argument(
+        "--split-date",
+        type=str,
+        required=True,
+        metavar="YYYY-MM-DD",
+        help="Cutoff date (YYYY-MM-DD). Train = CreateDate < this, test = CreateDate >= this.",
+    )
+    p.add_argument(
+        "--batch-size",
+        type=int,
+        default=500,
+        help="NCBI esummary batch size when metadata not in snapshot. Default: 500",
+    )
+    p.set_defaults(func=_run_temporal_split_info)
+
+
+def _run_temporal_split_info(args) -> None:
+    run_temporal_split_info(
+        args.accessions_file,
+        args.split_date,
+        batch_size=getattr(args, "batch_size", 500),
+        verbose=True,
+    )
+
+
 def _run_download(args) -> None:
     download_genomes(
         args.num_organisms,
@@ -511,9 +569,9 @@ def _run_snapshot(args) -> None:
     output = getattr(args, "output", None) or get_default_snapshot_path()
     run_snapshot(
         output,
-        fetch_db_info=not getattr(args, "no_db_info", False),
         fetch_metadata=not getattr(args, "no_metadata", False),
         metadata_batch_size=getattr(args, "metadata_batch_size", 500),
+        log_path=getattr(args, "log", None),
     )
 
 
@@ -777,18 +835,20 @@ def _run_temporal_split(args) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Metagenome simulator (download, snapshot, chunk, pipeline, blastn-filter, seeker, temporal-split)",
+        description="Metagenome simulator (download, snapshot, migrate-snapshot, chunk, pipeline, blastn-filter, seeker, temporal-split, temporal-split-info)",
     )
     subparsers = parser.add_subparsers(dest="command")
     subparsers.required = True
 
     _add_download_subparser(subparsers)
     _add_snapshot_subparser(subparsers)
+    _add_migrate_snapshot_subparser(subparsers)
     _add_chunk_subparser(subparsers)
     _add_pipeline_subparser(subparsers)
     _add_blastn_filter_subparser(subparsers)
     _add_seeker_subparser(subparsers)
     _add_temporal_split_subparser(subparsers)
+    _add_temporal_split_info_subparser(subparsers)
 
     args = parser.parse_args()
     args.func(args)
