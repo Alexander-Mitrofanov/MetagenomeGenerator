@@ -72,7 +72,7 @@ metagenome-generator snapshot
 | `--output` | Output JSON path | `snapshots/accession_snapshot_YYYY-MM-DD.json` (run date) |
 | `--no-db-info` | Do not fetch NCBI nucleotide db metadata (einfo) | off |
 | `--no-metadata` | Do not fetch CreateDate and title per accession (faster snapshot) | off |
-| `--metadata-batch-size` | esummary batch size when fetching metadata | 200 |
+| `--metadata-batch-size` | esummary batch size when fetching metadata | 500 |
 
 **Typical workflow:** Run `snapshot` once (or periodically). Each run creates a date-stamped file (e.g. `snapshots/accession_snapshot_2026-03-10.json`). Edit the JSON to keep a subset of accessions if needed, then run `download --accessions-file snapshots/accession_snapshot_2026-03-10.json` (or the same with `pipeline`) to build from that catalog.
 
@@ -112,6 +112,8 @@ metagenome-generator download \
 |----------|-------------|---------|
 | `--num-organisms` | Number of organisms to download **per group** (bacterial and viral) | 10 |
 | `--output-dir` | Root for downloads; genomes are written into `bacteria/`, `virus/`, `archaea/`, `plasmid/` subfolders | `output` |
+| `--num-archaea` | Number of archaeal genomes to download (negative samples) | 0 |
+| `--num-plasmid` | Number of plasmids to download (negative samples) | 0 |
 | `--accessions-file` | Load accession IDs from a JSON file (skip NCBI search). Use for reproducible runs; file may include a `timestamp` of when the list was obtained | off |
 | `--save-accessions` | After searching NCBI, save the accession list and current UTC **timestamp** to this JSON path. Use this file later with `--accessions-file` to re-download the same set | off |
 
@@ -148,6 +150,7 @@ metagenome-generator chunk \
 | `--similarity-threshold` | Max BLASTN percent identity for "similar" (default 90) | 90 |
 | `--similarity-min-coverage` | Min fraction of query length in alignment to count as similar | 0.8 |
 | `--oversample-factor` | When `--filter-similar`: generate up to this many times target before filtering | 2.0 |
+| `--forbid-ambiguous` | Exclude chunks that contain non-ACGT characters (e.g. N) | off |
 
 ### BLASTN filtering (EVE removal)
 
@@ -223,6 +226,9 @@ This creates `output/downloaded/`, `output/metagenome/metagenome.fasta`, and (if
 | `--train-test-similarity-threshold` | Remove from test if ≥ this % identity to train | 90 |
 | `--accessions-file` | For download step: load accession IDs from JSON (reproducibility; skip NCBI search) | off |
 | `--save-accessions` | For download step: save accession list and UTC timestamp to JSON after searching | off |
+| `--run-blastn-filter` | Run BLASTN (non-viral vs viral) and exclude EVE regions when chunking | off |
+| `--run-seeker` | Run Seeker (phage/bacteria prediction) on the metagenome FASTA after chunking | off |
+| `--forbid-ambiguous` | Exclude chunks containing non-ACGT characters (e.g. N) | off |
 
 ### Balanced mode
 
@@ -363,6 +369,7 @@ This pipeline supports:
 | BLASTN to remove endogenous viral elements | **Built-in:** `blastn-filter` subcommand (or `pipeline --run-blastn-filter`). Non-viral vs viral BLASTN; chunks overlapping hits are excluded via `chunk --eve-intervals`. |
 | Similarity filtering (e.g. 90% max) | **Built-in:** `chunk --filter-similar` (or `pipeline --filter-similar`). Oversample, drop chunks similar to already-kept (BLASTN), refill; warnings in log if target not reached. |
 | Train-test split (no similarity overlap) | **Built-in:** `chunk --train-test-split PCT` (or `pipeline --train-test-split PCT`). Split by percentage; remove from test any sequence ≥ threshold similar to train (`--train-test-similarity-threshold`). |
+| Temporal train/test split (by NCBI CreateDate) | **Built-in:** `temporal-split` subcommand. Split accessions into train (CreateDate &lt; date) and test (≥ date); output two JSONs for use with `download --accessions-file`. Uses `accession_metadata` from snapshot when present. |
 
 Realm-level viral taxonomy (RefSeq) can be approximated by refining the viral query in `ncbi_search.py` (e.g. by taxon name or using NCBI’s taxonomy filters).
 
@@ -389,6 +396,7 @@ MetagenomeGenerator/
 │       ├── genome_layout.py
 │       ├── blastn_filter.py
 │       ├── similarity_filter.py
+│       ├── temporal_split.py
 │       └── seeker_wrapper.py
 ├── snapshots/              # Default output for snapshot (date-stamped JSON)
 └── data/                   # Optional; user data
