@@ -39,8 +39,8 @@ dev = [
 metagenome-generator = "metagenome_generator.cli:main"
 
 [project.urls]
-Repository = "https://github.com/yourusername/metagenome-generator"
-Documentation = "https://github.com/yourusername/metagenome-generator#readme"
+Repository = "https://github.com/Alexander-Mitrofanov/MetagenomeGenerator"
+Documentation = "https://github.com/Alexander-Mitrofanov/MetagenomeGenerator#readme"
 
 [tool.setuptools.packages.find]
 where = ["src"]
