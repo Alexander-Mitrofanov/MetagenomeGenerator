@@ -1,0 +1,40 @@
+# Bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual / conda
+.venv/
+venv/
+env/
+.env
+
+# Build and install
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Project outputs (generated data; do not commit)
+output/
+output_*/
+data/
+snapshots/
+
+# Test and coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Ruff
+.ruff_cache/
