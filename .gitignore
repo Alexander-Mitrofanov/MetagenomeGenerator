@@ -30,6 +30,9 @@ data/
 snapshots/
 working_directory/
 
+# Local-only docs (not published to the repo)
+docs/
+
 # Test and coverage
 .pytest_cache/
 .coverage

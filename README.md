@@ -396,10 +396,6 @@ MetagenomeGenerator/
 
 After `pip install -e .`, the `metagenome-generator` console script is available. Programmatic use: `from metagenome_generator import build_metagenome, download_genomes, load_accessions, validate_genome_dir`.
 
-## Data preparation comparison with published methods
-
-A detailed comparison of this tool’s data-prep steps with those in DeepVirFinder, VIBRANT, VirFinder, and VirSorter2 (sources, temporal split, negatives, EVE handling, and suggested extensions) is in **[docs/DATA_PREPARATION_COMPARISON.md](docs/DATA_PREPARATION_COMPARISON.md)**. A concise backlog of improvement ideas is in **[docs/improvements.md](docs/improvements.md)**.
-
 ## Notes
 
 - NCBI rate limits apply; the download and snapshot steps add short delays between requests. Failed fetches are retried up to 3 times with backoff.
