@@ -41,32 +41,62 @@ export ENTREZ_API_KEY="your_ncbi_api_key"
 
 ## Usage
 
-After installation, use the `metagenome-generator` command (or `python -m metagenome_generator`). From the repo root you can also run `python main.py`. Subcommands: `download`, `snapshot`, `chunk`, `pipeline`, `blastn-filter`, `seeker`.
+After installation, use the `metagenome-generator` command (or `python -m metagenome_generator`). From the repo root you can also run `python main.py`. Subcommands: `download`, `snapshot`, `chunk`, `pipeline`, `blastn-filter`, `seeker`, `temporal-split`.
+
+**Keep the project clean:** use a dedicated **working directory** for all outputs and run data (e.g. `working_directory/`). It is gitignored. See [working_directory/README.md](working_directory/README.md) for layout and examples.
 
 ```bash
+mkdir -p working_directory/snapshots
 metagenome-generator --help
-metagenome-generator download --num-organisms 10 --output-dir output
-metagenome-generator snapshot
-metagenome-generator chunk --input output --output metagenome.fasta --output-dir output
+metagenome-generator download --num-organisms 10 --output-dir working_directory
+metagenome-generator snapshot --output working_directory/snapshots/accession_snapshot_$(date +%Y-%m-%d).json
+metagenome-generator chunk --input working_directory/downloaded --output metagenome.fasta --output-dir working_directory/metagenome
 ```
 
 ### Accession snapshot (no downloads)
 
 Catalog **all** bacterial, viral, archaeal, and plasmid accession IDs that match the project’s RefSeq + complete-genome criteria—**without downloading any sequences**. Only presence in the NCBI database is recorded. Output is written to the **`snapshots/`** folder. By default the filename includes the run date: `snapshots/accession_snapshot_YYYY-MM-DD.json`. You can then subset or edit that file and pass it to `download` or `pipeline` via `--accessions-file`.
 
-The tool uses NCBI’s History server and paging (10,000 UIDs per request) to retrieve full result sets. A **local UTC timestamp** is stored; NCBI does not provide a database “as of” date. Optionally, nucleotide DB metadata (e.g. record count) is fetched via `einfo`.
+The tool uses NCBI’s History server and paging (10,000 UIDs per request) to retrieve full result sets. A **local UTC timestamp** is stored; NCBI does not provide a database “as of” date. Optionally, nucleotide DB metadata (e.g. record count) is fetched via `einfo`. By default, **per-accession metadata** is also fetched via NCBI `esummary`: **CreateDate** (YYYY/MM/DD) and **Title** (genome description, i.e. the FASTA header text). These are stored under the `accession_metadata` key in the snapshot JSON. `temporal-split` can then use this data and skip a second NCBI round-trip. Use `--no-metadata` for a faster snapshot if you do not need dates or headers.
 
 ```bash
 metagenome-generator snapshot
 # or: metagenome-generator snapshot --output snapshots/my_snapshot.json
+# Skip per-accession metadata (faster): metagenome-generator snapshot --no-metadata
 ```
+
+**Snapshot JSON format:** In addition to `timestamp`, `bacterial`, `viral`, `archaea`, `plasmid`, the file may contain `accession_metadata`: a dict mapping each accession to `{"create_date": "YYYY/MM/DD", "title": "..."}` (NCBI CreateDate and genome title/header).
 
 | Argument | Description | Default |
 |----------|-------------|---------|
 | `--output` | Output JSON path | `snapshots/accession_snapshot_YYYY-MM-DD.json` (run date) |
 | `--no-db-info` | Do not fetch NCBI nucleotide db metadata (einfo) | off |
+| `--no-metadata` | Do not fetch CreateDate and title per accession (faster snapshot) | off |
+| `--metadata-batch-size` | esummary batch size when fetching metadata | 200 |
 
 **Typical workflow:** Run `snapshot` once (or periodically). Each run creates a date-stamped file (e.g. `snapshots/accession_snapshot_2026-03-10.json`). Edit the JSON to keep a subset of accessions if needed, then run `download --accessions-file snapshots/accession_snapshot_2026-03-10.json` (or the same with `pipeline`) to build from that catalog.
+
+### Temporal train/test split (by NCBI CreateDate)
+
+To align with **DeepVirFinder**- or **VirFinder**-style evaluation (train on sequences “discovered” before a date, test on those added on or after), use the `temporal-split` subcommand. It reads an accessions JSON (e.g. from `snapshot`). If the file contains **accession_metadata** (CreateDate and title from `snapshot`), it uses that and skips NCBI; otherwise it fetches CreateDate via `esummary`. It writes two JSONs: **train** (CreateDate &lt; split-date) and **test** (CreateDate ≥ split-date). Both files are valid for `download --accessions-file`.
+
+```bash
+metagenome-generator temporal-split \
+  --accessions-file snapshots/accession_snapshot_2026-03-10.json \
+  --split-date 2015-05-01
+```
+
+By default this writes `train_<basename>.json` and `test_<basename>.json` next to the input file. Use `--output-train` and `--output-test` to set paths. Then run download (or pipeline) twice with the train and test JSONs to build separate train/test genome sets.
+
+| Argument | Description |
+|----------|-------------|
+| `--accessions-file` | Input JSON with bacterial, viral, archaea, plasmid lists (e.g. from `snapshot`) |
+| `--split-date` | Cutoff date **YYYY-MM-DD** (e.g. `2015-05-01`). Train = CreateDate &lt; date, test = ≥ date |
+| `--output-train` | Path for train accessions JSON (default: same dir as input, `train_<basename>.json`) |
+| `--output-test` | Path for test accessions JSON (default: same dir as input, `test_<basename>.json`) |
+| `--batch-size` | NCBI esummary batch size (default: 200) |
+
+Requires `ENTREZ_EMAIL` (and optionally `ENTREZ_API_KEY`) for NCBI rate limits.
 
 ### Download genomes only
 
@@ -365,6 +395,10 @@ MetagenomeGenerator/
 ```
 
 After `pip install -e .`, the `metagenome-generator` console script is available. Programmatic use: `from metagenome_generator import build_metagenome, download_genomes, load_accessions, validate_genome_dir`.
+
+## Data preparation comparison with published methods
+
+A detailed comparison of this tool’s data-prep steps with those in DeepVirFinder, VIBRANT, VirFinder, and VirSorter2 (sources, temporal split, negatives, EVE handling, and suggested extensions) is in **[docs/DATA_PREPARATION_COMPARISON.md](docs/DATA_PREPARATION_COMPARISON.md)**. A concise backlog of improvement ideas is in **[docs/improvements.md](docs/improvements.md)**.
 
 ## Notes
 

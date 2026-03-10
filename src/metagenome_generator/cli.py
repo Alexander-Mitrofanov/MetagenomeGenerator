@@ -2,7 +2,7 @@
 from __future__ import annotations
 """Unified CLI for the metagenome simulator.
 
-Subcommands: download, snapshot, chunk, pipeline, blastn-filter, seeker.
+Subcommands: download, snapshot, chunk, pipeline, blastn-filter, seeker, temporal-split.
 """
 
 import argparse
@@ -15,6 +15,7 @@ from .chunk_genomes import build_metagenome, get_file_stats, split_train_test_an
 from .seeker_wrapper import SEEKER_MIN_LENGTH, run_seeker
 from .blastn_filter import load_eve_intervals, run_blastn_from_dirs
 from .genome_layout import validate_genome_dir
+from .temporal_split import run_temporal_split
 
 # Organized output layout (pipeline): one root dir with step-based subdirs for easy navigation.
 OUTPUT_DIR_DOWNLOADED = "downloaded"
@@ -85,6 +86,17 @@ def _add_snapshot_subparser(subparsers) -> None:
         "--no-db-info",
         action="store_true",
         help="Do not fetch NCBI nucleotide db metadata (einfo).",
+    )
+    p.add_argument(
+        "--no-metadata",
+        action="store_true",
+        help="Do not fetch CreateDate and title per accession (faster; temporal-split will fetch when needed).",
+    )
+    p.add_argument(
+        "--metadata-batch-size",
+        type=int,
+        default=500,
+        help="Batch size for esummary when fetching per-accession metadata. Default: 500",
     )
     p.set_defaults(func=_run_snapshot)
 
@@ -442,6 +454,48 @@ def _add_seeker_subparser(subparsers) -> None:
     p.set_defaults(func=_run_seeker)
 
 
+def _add_temporal_split_subparser(subparsers) -> None:
+    p = subparsers.add_parser(
+        "temporal-split",
+        help="Split accession list by NCBI CreateDate into train (before date) and test (on/after). Outputs two JSONs for use with download --accessions-file.",
+    )
+    p.add_argument(
+        "--accessions-file",
+        type=Path,
+        required=True,
+        metavar="PATH",
+        help="Input JSON with bacterial, viral, archaea, plasmid accession lists (e.g. from snapshot).",
+    )
+    p.add_argument(
+        "--split-date",
+        type=str,
+        required=True,
+        metavar="YYYY-MM-DD",
+        help="Cutoff date (YYYY-MM-DD). Train = CreateDate < this date, test = CreateDate >= this date (e.g. 2015-05-01 for DeepVirFinder-style split).",
+    )
+    p.add_argument(
+        "--output-train",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Output path for train accessions JSON. Default: same dir as accessions-file, name train_<basename>.",
+    )
+    p.add_argument(
+        "--output-test",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Output path for test accessions JSON. Default: same dir as accessions-file, name test_<basename>.",
+    )
+    p.add_argument(
+        "--batch-size",
+        type=int,
+        default=200,
+        help="NCBI esummary batch size (rate-limited). Default: 200",
+    )
+    p.set_defaults(func=_run_temporal_split)
+
+
 def _run_download(args) -> None:
     download_genomes(
         args.num_organisms,
@@ -455,7 +509,12 @@ def _run_download(args) -> None:
 
 def _run_snapshot(args) -> None:
     output = getattr(args, "output", None) or get_default_snapshot_path()
-    run_snapshot(output, fetch_db_info=not getattr(args, "no_db_info", False))
+    run_snapshot(
+        output,
+        fetch_db_info=not getattr(args, "no_db_info", False),
+        fetch_metadata=not getattr(args, "no_metadata", False),
+        metadata_batch_size=getattr(args, "metadata_batch_size", 500),
+    )
 
 
 def _run_chunk(args) -> None:
@@ -696,9 +755,29 @@ def _run_seeker(args) -> None:
         raise SystemExit(e) from e
 
 
+def _run_temporal_split(args) -> None:
+    p = args.accessions_file.resolve()
+    if not p.exists():
+        raise SystemExit(f"--accessions-file not found: {p}")
+    base = p.parent
+    stem = p.stem
+    out_train = args.output_train or (base / f"train_{stem}.json")
+    out_test = args.output_test or (base / f"test_{stem}.json")
+    try:
+        run_temporal_split(
+            p,
+            args.split_date,
+            out_train,
+            out_test,
+            batch_size=args.batch_size,
+        )
+    except ValueError as e:
+        raise SystemExit(e) from e
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Metagenome simulator (download, snapshot, chunk, pipeline, blastn-filter, seeker)",
+        description="Metagenome simulator (download, snapshot, chunk, pipeline, blastn-filter, seeker, temporal-split)",
     )
     subparsers = parser.add_subparsers(dest="command")
     subparsers.required = True
@@ -709,6 +788,7 @@ def main() -> None:
     _add_pipeline_subparser(subparsers)
     _add_blastn_filter_subparser(subparsers)
     _add_seeker_subparser(subparsers)
+    _add_temporal_split_subparser(subparsers)
 
     args = parser.parse_args()
     args.func(args)

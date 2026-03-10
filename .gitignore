@@ -28,6 +28,7 @@ output/
 output_*/
 data/
 snapshots/
+working_directory/
 
 # Test and coverage
 .pytest_cache/

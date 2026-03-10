@@ -22,6 +22,7 @@ from pathlib import Path
 from Bio import Entrez
 
 from .download_genomes import (
+    ACCESSION_METADATA_KEY,
     ACCESSIONS_KEY_ARCHAEA,
     ACCESSIONS_KEY_BACTERIAL,
     ACCESSIONS_KEY_PLASMID,
@@ -29,6 +30,7 @@ from .download_genomes import (
     ACCESSIONS_KEY_VIRAL,
 )
 from .ncbi_search import DEFAULT_QUERIES, search_genomes_all
+from .temporal_split import fetch_accession_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -71,12 +73,17 @@ def run_snapshot(
     output_path: Path,
     *,
     fetch_db_info: bool = True,
+    fetch_metadata: bool = True,
+    metadata_batch_size: int = 500,
 ) -> None:
     """Query NCBI for all matching accession IDs (no downloads), write JSON to snapshots.
 
     Fetches every bacterial, viral, archaeal, and plasmid genome matching
     DEFAULT_QUERIES (RefSeq, complete genome, length filters). Output is compatible
     with download_genomes --accessions-file. Optionally includes ncbi_db_info.
+    When fetch_metadata is True, also fetches CreateDate and Title (genome header)
+    per accession via esummary and stores them under accession_metadata; temporal-split
+    can then use this to avoid a second NCBI round-trip.
     """
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -109,8 +116,29 @@ def run_snapshot(
         data[NCBI_DB_INFO_KEY] = ncbi_info
         print(f"  NCBI nucleotide db: {ncbi_info.get('Count', '?')} records (einfo)")
 
+    # Write snapshot immediately so we have a valid file even if metadata fetch fails
     with output_path.open("w") as f:
         json.dump(data, f, indent=2)
+    print(f"Snapshot (accession lists) saved to {output_path}")
+
+    if fetch_metadata:
+        all_ids = list(dict.fromkeys(bacterial + viral + archaea + plasmid))
+        if all_ids:
+            total_batches = (len(all_ids) + metadata_batch_size - 1) // metadata_batch_size
+            print(f"  Fetching CreateDate and title for {len(all_ids)} accessions (batches of {metadata_batch_size}, ~{total_batches} batches)...")
+
+            def _progress(batch_num: int, total: int, fetched: int) -> None:
+                print(f"    Metadata: batch {batch_num}/{total}, {fetched} accessions so far")
+
+            metadata = fetch_accession_metadata(
+                all_ids,
+                batch_size=metadata_batch_size,
+                progress_callback=_progress,
+            )
+            data[ACCESSION_METADATA_KEY] = metadata
+            with output_path.open("w") as f:
+                json.dump(data, f, indent=2)
+            print(f"    Stored metadata for {len(metadata)} accessions; snapshot updated.")
 
     logger.info("Accession snapshot written to %s (timestamp=%s)", output_path, now)
     print(f"Snapshot saved to {output_path} (timestamp {now})")
@@ -134,9 +162,25 @@ def _cli(argv: list[str] | None = None) -> None:
         action="store_true",
         help="Do not fetch NCBI nucleotide db metadata (einfo).",
     )
+    parser.add_argument(
+        "--no-metadata",
+        action="store_true",
+        help="Do not fetch CreateDate and title per accession (faster snapshot; temporal-split will fetch dates when needed).",
+    )
+    parser.add_argument(
+        "--metadata-batch-size",
+        type=int,
+        default=500,
+        help="Batch size for esummary when fetching metadata (default 500).",
+    )
     args = parser.parse_args(argv)
     output_path = args.output or get_default_snapshot_path()
-    run_snapshot(output_path, fetch_db_info=not args.no_db_info)
+    run_snapshot(
+        output_path,
+        fetch_db_info=not args.no_db_info,
+        fetch_metadata=not args.no_metadata,
+        metadata_batch_size=args.metadata_batch_size,
+    )
 
 
 def main() -> None:

@@ -30,13 +30,15 @@ ACCESSIONS_KEY_BACTERIAL = "bacterial"
 ACCESSIONS_KEY_VIRAL = "viral"
 ACCESSIONS_KEY_ARCHAEA = "archaea"
 ACCESSIONS_KEY_PLASMID = "plasmid"
+# Optional: per-accession metadata (create_date, title) from NCBI esummary
+ACCESSION_METADATA_KEY = "accession_metadata"
 
 
 def load_accessions(path: Path) -> dict:
-    """Load accession lists and optional timestamp from a JSON file.
+    """Load accession lists and optional metadata from a JSON file.
 
     Expected keys: bacterial, viral, archaea, plasmid (lists of accession IDs).
-    Optional key: timestamp (ISO8601 string, when the list was obtained).
+    Optional: timestamp (ISO8601 string); accession_metadata (dict of accession -> {create_date, title}).
     Returns the full JSON dict; missing list keys default to [] when used.
     """
     with path.open() as f:
