@@ -1,6 +1,42 @@
 # Metagenome Generator
 
-Download bacterial and viral genomes from NCBI and chunk them into fixed-length reads to build simulated metagenome FASTAs for training classifiers.
+A Python tool to build **simulated metagenome datasets** from NCBI RefSeq genomes for training and evaluating sequence classifiers (e.g. viral vs. prokaryotic).
+
+---
+
+## What it does
+
+**Metagenome Generator** downloads bacterial, viral, archaeal, and plasmid genomes from NCBI, cuts them into fixed- or variable-length reads, and writes FASTA files you can use as training or test data. It supports reproducible runs, temporal train/test splits, and common data-prep steps used in tools like DeepVirFinder and VirFinder.
+
+### Core functionality
+
+- **Download genomes** — Fetch genomes from NCBI Nucleotide by category (bacteria, virus, archaea, plasmid) with RefSeq and completeness filters.
+- **Chunk into reads** — Turn genome FASTAs into fixed-length (or variable-length) “reads” and optionally balance or cap reads per genome.
+- **Build metagenomes** — Single FASTA with reads from all categories; optional train/test split and similarity filtering.
+
+### What you can use it for
+
+- **Training classifiers** — Generate positive (viral) and negative (bacterial/archaeal/plasmid) reads for virus vs. non-virus (or phage vs. bacteria) models.
+- **Reproducible datasets** — Snapshot accession lists (with optional CreateDate/title) and re-download or re-chunk the same set later.
+- **Temporal evaluation** — Split by NCBI CreateDate: train on “older” genomes, test on “newer” ones to mimic real-world generalization.
+- **Cleaner negatives** — Optionally remove endogenous viral elements (EVEs) via BLASTN and drop near-duplicate reads with similarity filtering.
+- **Downstream tools** — Output is standard FASTA; you can run e.g. Seeker (phage/bacteria prediction) on the generated metagenome.
+
+### Commands at a glance
+
+| Command | Purpose |
+|--------|--------|
+| `download` | Download genomes from NCBI into category folders. |
+| `chunk` | Turn genome FASTAs into a single metagenome FASTA of reads. |
+| `pipeline` | Download + chunk in one go (optional BLASTN, Seeker). |
+| `snapshot` | Save full catalog of matching accessions (no downloads). |
+| `temporal-split-info` | Show train/test counts for a date (no files written). |
+| `temporal-split` | Write train/test accession JSONs by CreateDate. |
+| `migrate-snapshot` | Convert old snapshot format to per-category metadata. |
+| `blastn-filter` | BLAST non-viral vs viral, output EVE intervals for chunk step. |
+| `seeker` | Run Seeker on a metagenome FASTA (phage/bacteria labels). |
+
+---
 
 ## Installation
 
@@ -31,57 +67,173 @@ pip install -e .
 - Biopython ≥ 1.83
 - BLAST+ (for EVE removal and similarity filtering; install via conda or system)
 
-NCBI Entrez requires an email for the download/snapshot steps:
+NCBI Entrez requires an email (and optionally an API key for higher rate limits):
 
 ```bash
 export ENTREZ_EMAIL="your_email@example.com"
-# Optional, for higher rate limits:
-export ENTREZ_API_KEY="your_ncbi_api_key"
+export ENTREZ_API_KEY="your_ncbi_api_key"   # optional
 ```
+
+---
 
 ## Usage
 
-After installation, use the `metagenome-generator` command (or `python -m metagenome_generator`). From the repo root you can also run `python main.py`. Subcommands: `download`, `snapshot`, `migrate-snapshot`, `chunk`, `pipeline`, `blastn-filter`, `seeker`, `temporal-split`, `temporal-split-info`.
+Use the `metagenome-generator` command (or `python -m metagenome_generator`). From the repo root you can also run `python main.py`.
 
-**Keep the project clean:** use a dedicated **working directory** for all outputs and run data (e.g. `working_directory/`). It is gitignored. See [working_directory/README.md](working_directory/README.md) for layout and examples.
+**Tip:** Use a dedicated **working directory** for outputs (e.g. `working_directory/`); it is gitignored. See [working_directory/README.md](working_directory/README.md) for a suggested layout.
 
-```bash
-mkdir -p working_directory/snapshots
-metagenome-generator --help
-metagenome-generator download --num-organisms 10 --output-dir working_directory
-metagenome-generator snapshot --output working_directory/snapshots/accession_snapshot_$(date +%Y-%m-%d).json
-metagenome-generator chunk --input working_directory/downloaded --output metagenome.fasta --output-dir working_directory/metagenome
-```
+---
 
-### Accession snapshot (no downloads)
+### Quick start: simple examples
 
-Catalog **all** bacterial, viral, archaeal, and plasmid accession IDs that match the project’s RefSeq + complete-genome criteria—**without downloading any sequences**. Only presence in the NCBI database is recorded. Output is written to the **`snapshots/`** folder. By default the filename includes the run date: `snapshots/accession_snapshot_YYYY-MM-DD.json`. You can then subset or edit that file and pass it to `download` or `pipeline` via `--accessions-file`.
-
-The tool uses NCBI’s History server and paging (10,000 UIDs per request) to retrieve full result sets. A **local UTC timestamp** is stored; NCBI does not provide a database “as of” date. By default the snapshot fetches **CreateDate** and **Title** for every ID via `esummary` and stores them **per category** (each accession appears as `{accession, create_date, title}` inside `bacterial`, `viral`, `archaea`, `plasmid`). Use **`--no-metadata`** to store only ID lists (no dates/titles).
+**1. Download 10 bacterial + 10 viral genomes and build one metagenome (250 nt reads, 1000 per genome):**
 
 ```bash
-metagenome-generator snapshot
-# or: metagenome-generator snapshot --output snapshots/my_snapshot.json
-# Lists only (no CreateDate/title): metagenome-generator snapshot --no-metadata
+metagenome-generator pipeline \
+  --num-organisms 10 \
+  --output-dir output \
+  --output metagenome.fasta \
+  --sequence-length 250 \
+  --reads-per-organism 1000
 ```
 
-**Snapshot JSON format:** `timestamp` plus four categories: `bacterial`, `viral`, `archaea`, `plasmid`. With metadata (default), each category is a list of objects: `{"accession": "...", "create_date": "YYYY/MM/DD", "title": "..."}`. With `--no-metadata`, each category is a list of accession ID strings. Legacy snapshots with a top-level `accession_metadata` dict (or `ncbi_db_info`) are still read by `download` and `temporal-split`. To convert an existing file to the new format without re-downloading, run: **`metagenome-generator migrate-snapshot snapshots/accession_snapshot_YYYY-MM-DD.json`**.
+Result: `output/downloaded/` (genomes) and `output/metagenome/metagenome.fasta` (reads).
 
-**Counts:** The log line “Stored metadata for 133,445 accessions” is the number of **unique** accessions (some IDs can appear in more than one category, e.g. plasmid + bacterial). The four category arrays together have 133,454 entries (33,089 + 8,324 + 460 + 91,581); the difference (9) is duplicates. So the snapshot does contain all accessions; if you see a smaller number (e.g. ~55k), it may be from viewing only part of the file or one category.
+**2. Download only (no chunking):**
+
+```bash
+metagenome-generator download --num-organisms 10 --output-dir output
+```
+
+**3. Chunk existing genomes (e.g. from a previous download):**
+
+```bash
+metagenome-generator chunk \
+  --input output/downloaded \
+  --output metagenome.fasta \
+  --output-dir output/metagenome \
+  --sequence-length 250 \
+  --reads-per-organism 1000
+```
+
+**4. Balanced reads (same number of reads per genome, so viral and bacterial contribute equally):**
+
+```bash
+metagenome-generator chunk \
+  --input output/downloaded \
+  --output metagenome.fasta \
+  --output-dir output/metagenome \
+  --sequence-length 250 \
+  --balanced
+```
+
+---
+
+### Download genomes
+
+Saves one FASTA per genome in category subfolders: `bacteria/`, `virus/`, `archaea/`, `plasmid/`.
+
+```bash
+metagenome-generator download \
+  --num-organisms 10 \
+  --output-dir output
+```
 
 | Argument | Description | Default |
 |----------|-------------|---------|
-| `--output` | Output JSON path | `snapshots/accession_snapshot_YYYY-MM-DD.json` (run date) |
-| `--no-metadata` | Do not fetch CreateDate and title per accession (lists only) | off |
-| `--metadata-batch-size` | esummary batch size when fetching metadata | 500 |
+| `--num-organisms` | Number per group (bacterial and viral) | 10 |
+| `--output-dir` | Root for `bacteria/`, `virus/`, `archaea/`, `plasmid/` | `output` |
+| `--num-archaea` | Archaeal genomes (negatives) | 0 |
+| `--num-plasmid` | Plasmids (negatives) | 0 |
+| `--accessions-file` | JSON of accession IDs (skip NCBI search; reproducible) | — |
+| `--save-accessions` | Save accession list + timestamp to JSON after search | — |
 
-**Typical workflow:** Run `snapshot` once (or periodically). Each run creates a date-stamped file (e.g. `snapshots/accession_snapshot_2026-03-10.json`). Edit the JSON to keep a subset of accessions if needed, then run `download --accessions-file snapshots/accession_snapshot_2026-03-10.json` (or the same with `pipeline`) to build from that catalog.
+**Reproducibility:** Use `snapshot` to write a full catalog to JSON, or `--save-accessions` during download; then use `--accessions-file` to re-download the same set.
+
+---
+
+### Chunk genomes into reads
+
+Reads genome FASTAs, cuts them into fixed-length reads, writes one metagenome FASTA.
+
+```bash
+metagenome-generator chunk \
+  --input output/downloaded \
+  --output metagenome_250nt.fasta \
+  --output-dir output/metagenome \
+  --sequence-length 250 \
+  --reads-per-organism 1000
+```
+
+| Argument | Description | Default |
+|----------|-------------|---------|
+| `--input` | FASTA file or **directory** of genome FASTAs | *(required)* |
+| `--output` | **Filename** for the metagenome FASTA | *(required)* |
+| `--output-dir` | Directory to write the output file | `output` |
+| `--sequence-length` | Read length (nt) | 250 |
+| `--reads-per-organism` | Max reads per genome file | all |
+| `--balanced` | Equal reads per file (min across files) | off |
+| `--eve-intervals` | JSON from `blastn-filter`; exclude EVE regions | — |
+| `--filter-similar` | Drop reads ≥90% similar (BLASTN) to already-kept | off |
+| `--train-test-split` | Train % (e.g. 80 → 80% train, 20% test) | off |
+| `--forbid-ambiguous` | Exclude reads with non-ACGT (e.g. N) | off |
+
+---
+
+### Full pipeline (download + chunk)
+
+One command for download and chunk; optional BLASTN (EVE removal) and Seeker.
+
+```bash
+metagenome-generator pipeline \
+  --num-organisms 10 \
+  --output-dir output \
+  --output metagenome.fasta \
+  --sequence-length 250 \
+  --reads-per-organism 1000
+```
+
+Output layout under `output-dir/`:
+
+| Subfolder | Contents |
+|-----------|----------|
+| `downloaded/` | Genome FASTAs in `bacteria/`, `virus/`, `archaea/`, `plasmid/` |
+| `blastn/` | BLASTN outputs and `eve_intervals.json` (if `--run-blastn-filter`) |
+| `metagenome/` | Metagenome FASTA |
+| `seeker/` | Seeker predictions (if `--run-seeker`) |
+| `logs/` | `pipeline.log` |
+
+Options: `--balanced`, `--filter-similar`, `--train-test-split`, `--run-blastn-filter`, `--run-seeker`, `--accessions-file`, `--forbid-ambiguous`. See `metagenome-generator pipeline --help`.
+
+---
+
+### Accession snapshot (no downloads)
+
+Catalog **all** matching NCBI accessions (bacterial, viral, archaeal, plasmid) without downloading sequences. Saves a date-stamped JSON you can subset and pass to `download` or `pipeline` via `--accessions-file`.
+
+```bash
+metagenome-generator snapshot
+# or: metagenome-generator snapshot --output snapshots/accession_snapshot_2026-03-10.json
+# Lists only (no CreateDate/title): metagenome-generator snapshot --no-metadata
+```
+
+**Format:** `timestamp` plus `bacterial`, `viral`, `archaea`, `plasmid`. With metadata (default), each category is a list of `{accession, create_date, title}`. With `--no-metadata`, each is a list of accession ID strings.
+
+| Argument | Description | Default |
+|----------|-------------|---------|
+| `--output` | Output JSON path | `snapshots/accession_snapshot_YYYY-MM-DD.json` |
+| `--no-metadata` | Do not fetch CreateDate/title per accession | off |
+| `--metadata-batch-size` | esummary batch size | 500 |
+
+**Convert old snapshot format:** `metagenome-generator migrate-snapshot snapshots/accession_snapshot_YYYY-MM-DD.json`
+
+---
 
 ### Temporal train/test split (by NCBI CreateDate)
 
-To align with **DeepVirFinder**- or **VirFinder**-style evaluation (train on sequences “discovered” before a date, test on those added on or after), run **`temporal-split-info`** first to see how many accessions fall into train vs test for a given date—then run **`temporal-split`** to write the two JSONs.
+Split accessions by **CreateDate**: train = before a date, test = on or after (e.g. for DeepVirFinder-style evaluation). Use **`temporal-split-info`** first to see counts, then **`temporal-split`** to write JSONs.
 
-**1. Preview train/test counts (no files written):**
+**1. Preview (no files written):**
 
 ```bash
 metagenome-generator temporal-split-info \
@@ -113,7 +265,7 @@ Temporal split preview (split date: 2019-06-01)
   Run 'temporal-split' with this --split-date to write train/test JSONs.
 ```
 
-**2. Write train and test accession JSONs:**
+**2. Write train and test JSONs:**
 
 ```bash
 metagenome-generator temporal-split \
@@ -121,327 +273,95 @@ metagenome-generator temporal-split \
   --split-date 2019-06-01
 ```
 
-By default this writes `train_<basename>.json` and `test_<basename>.json` next to the input file. Use `--output-train` and `--output-test` to set paths. Then run download (or pipeline) with each JSON to build separate train/test genome sets.
+Then run `download` or `pipeline` with `--accessions-file train_<basename>.json` and `--accessions-file test_<basename>.json` to build separate datasets.
 
 | Command / argument | Description |
 |--------------------|-------------|
-| **temporal-split-info** | Show train/test counts per category and total (no files written). Use before `temporal-split` to choose a date. |
-| `--accessions-file` | Input JSON with bacterial, viral, archaea, plasmid lists (e.g. from `snapshot`) |
-| `--split-date` | Cutoff date **YYYY-MM-DD** (e.g. `2019-06-01`). Train = CreateDate &lt; date, test = ≥ date |
-| `--output-train` | Path for train accessions JSON (default: same dir as input, `train_<basename>.json`) |
-| `--output-test` | Path for test accessions JSON (default: same dir as input, `test_<basename>.json`) |
-| `--batch-size` | NCBI esummary batch size when metadata not in snapshot (default: 200 / 500 for info) |
+| **temporal-split-info** | Show train/test counts (no files written). |
+| `--accessions-file` | Snapshot or accessions JSON |
+| `--split-date` | Cutoff **YYYY-MM-DD** (train &lt; date, test ≥ date) |
+| `--output-train` / `--output-test` | Paths for output JSONs |
 
-Requires `ENTREZ_EMAIL` (and optionally `ENTREZ_API_KEY`) for NCBI rate limits when CreateDate is not already in the snapshot.
-
-### Download genomes only
-
-Saves one FASTA per genome in the chosen output directory.
-
-```bash
-metagenome-generator download \
-  --num-organisms 10 \
-  --output-dir output
-```
-
-| Argument | Description | Default |
-|----------|-------------|---------|
-| `--num-organisms` | Number of organisms to download **per group** (bacterial and viral) | 10 |
-| `--output-dir` | Root for downloads; genomes are written into `bacteria/`, `virus/`, `archaea/`, `plasmid/` subfolders | `output` |
-| `--num-archaea` | Number of archaeal genomes to download (negative samples) | 0 |
-| `--num-plasmid` | Number of plasmids to download (negative samples) | 0 |
-| `--accessions-file` | Load accession IDs from a JSON file (skip NCBI search). Use for reproducible runs; file may include a `timestamp` of when the list was obtained | off |
-| `--save-accessions` | After searching NCBI, save the accession list and current UTC **timestamp** to this JSON path. Use this file later with `--accessions-file` to re-download the same set | off |
-
-**Reproducibility (NCBI dataset):** NCBI search results change over time. You can fix the dataset in two ways:
-
-1. **Snapshot only (no downloads)** — use the `snapshot` subcommand to write a full catalog to `snapshots/accession_snapshot_YYYY-MM-DD.json`. Edit to subset if needed, then run download/pipeline with `--accessions-file snapshots/accession_snapshot_YYYY-MM-DD.json`.
-2. **Save during download** — run download with `--save-accessions out/accessions.json`; later use `--accessions-file out/accessions.json` to re-download the same set. The tool prints the timestamp from the file when using `--accessions-file`.
-
-### Chunk genomes into metagenome reads
-
-Reads the genome FASTAs, cuts them into fixed-length reads, and writes one metagenome FASTA.
-
-```bash
-metagenome-generator chunk \
-  --input output \
-  --output metagenome_250nt.fasta \
-  --output-dir output \
-  --sequence-length 250 \
-  --reads-per-organism 1000
-```
-
-| Argument | Description | Default |
-|----------|-------------|---------|
-| `--input` | Input FASTA file or **directory** of genome FASTAs (e.g. from download step) | *(required)* |
-| `--output` | **Filename** for the metagenome FASTA | *(required)* |
-| `--output-dir` | Directory to write the output file | `output` |
-| `--sequence-length` | Length of each read in nucleotides | 250 |
-| `--reads-per-organism` | Max reads to take per organism (per input file). Omit for all reads | all |
-| `--balanced` | Use equal reads per file: set reads-per-organism to the **minimum** max reads across all files (so bacteria and viruses contribute the same number of reads) | off |
-| `--eve-intervals` | Path to `eve_intervals.json` from `blastn-filter`; chunks overlapping EVE regions are **excluded** from output | off |
-| `--filter-similar` | Drop chunks that are ≥90% similar (BLASTN) to any already-kept chunk; oversample then refill to reach target; log warnings if target not reached | off |
-| `--train-test-split` | Split into train (PCT%%) and test; remove from test sequences similar to train | off |
-| `--train-test-similarity-threshold` | BLASTN percent identity above which test sequences are removed (vs train) | 90 |
-| `--similarity-threshold` | Max BLASTN percent identity for "similar" (default 90) | 90 |
-| `--similarity-min-coverage` | Min fraction of query length in alignment to count as similar | 0.8 |
-| `--oversample-factor` | When `--filter-similar`: generate up to this many times target before filtering | 2.0 |
-| `--forbid-ambiguous` | Exclude chunks that contain non-ACGT characters (e.g. N) | off |
+---
 
 ### BLASTN filtering (EVE removal)
 
-**Goal:** Endogenous viral elements (EVEs) in non-viral genomes (bacteria, archaea, plasmid) can be misclassified as viral. We align non-viral sequences against viral sequences with BLASTN, then **exclude** any chunk that overlaps a hit when building the training metagenome. Viral genomes are not BLAST’ed; only non-viral inputs are filtered.
+Remove **endogenous viral elements** from non-viral genomes: BLAST non-viral vs viral, then exclude chunks overlapping hits when building the metagenome.
 
-**When it runs:** After download, before or during chunking. Either run the `blastn-filter` subcommand once, then pass `--eve-intervals` to `chunk`, or use `pipeline --run-blastn-filter` so the pipeline runs BLASTN after download and passes EVE data into the chunk step.
-
-**How results are used:** BLASTN tabular output is parsed to get (query id, query start, query end) per hit. Intervals are merged per sequence. When chunking, any chunk whose [start, end) overlaps one of these intervals is **skipped** (not written). Sequences with no hits are chunked as usual.
-
-**Requirements:** BLAST+ must be installed (`conda install -c bioconda blast` or use the project env from `environment.yml`).
-
-**Standalone step (then chunk with EVE exclusion):**
+**Standalone:**
 
 ```bash
 metagenome-generator blastn-filter --genome-dir output/downloaded --out-dir output/blastn --evalue 1e-5 --perc-identity 70
-# Writes output/blastn/eve_intervals.json and output/blastn/blastn/*.blastn.tsv
-
 metagenome-generator chunk --input output/downloaded --output negative.fasta --output-dir output/metagenome \
   --balanced --eve-intervals output/blastn/eve_intervals.json
 ```
 
-**Integrated in pipeline:** (BLASTN output goes to `output-dir/blastn/`)
+**In pipeline:**
 
 ```bash
 metagenome-generator pipeline --num-organisms 5 --output-dir output \
   --balanced --run-blastn-filter --blastn-evalue 1e-5 --blastn-perc-identity 70
 ```
 
-| blastn-filter argument | Description | Default |
-|------------------------|-------------|---------|
-| `--genome-dir` | Directory with `bacterial_*.fasta`, `viral_*.fasta`, and optionally `archaea_*.fasta`, `plasmid_*.fasta` | *(required)* |
-| `--out-dir` | Where to write `viral_concat.fasta`, `blastn/`, and `eve_intervals.json` | *(required)* |
-| `--evalue` | BLASTN E-value threshold | 1e-5 |
-| `--perc-identity` | BLASTN percent identity threshold | 70 |
+Requires BLAST+ (`conda install -c bioconda blast` or use `environment.yml`).
 
-### Full pipeline: download + chunk (+ optional BLASTN, Seeker)
+---
 
-The pipeline uses an **organized output layout** so results are easy to navigate. One root directory (e.g. `output`) contains step-based subfolders:
+### Seeker (phage/bacteria prediction)
 
-| Subfolder | Contents |
-|-----------|----------|
-| `downloaded/` | Raw genome FASTAs from NCBI in category subfolders: `bacteria/`, `virus/`, `archaea/`, `plasmid/` |
-| `blastn/` | BLASTN outputs when `--run-blastn-filter`: viral DB, TSVs, `eve_intervals.json` |
-| `metagenome/` | Final chunked metagenome FASTA (e.g. `metagenome.fasta`) |
-| `seeker/` | Seeker predictions and phage FASTA when `--run-seeker` is used |
-| `logs/` | Pipeline log file (`pipeline.log`): download accessions/origins, BLASTN EVE stats, similarity filtering, warnings |
-
-Example:
-
-```bash
-metagenome-generator pipeline \
-  --num-organisms 10 \
-  --output-dir output \
-  --output metagenome.fasta \
-  --sequence-length 250 \
-  --reads-per-organism 1000
-```
-
-This creates `output/downloaded/`, `output/metagenome/metagenome.fasta`, and (if used) `output/blastn/`, `output/seeker/`.
-
-| Argument | Description | Default |
-|----------|-------------|---------|
-| `--num-organisms` | Number of organisms to download **per group** (bacterial and viral) | 10 |
-| `--output-dir` | **Root** output directory; pipeline creates `downloaded/`, `blastn/`, `metagenome/`, `seeker/` under it | `output` |
-| `--output` | **Filename** for the metagenome FASTA (written under `output-dir/metagenome/`) | `metagenome.fasta` |
-| `--sequence-length` | Length of each read in nucleotides | 250 |
-| `--reads-per-organism` | Max reads to take per organism (per input file) | 1000 |
-| `--balanced` | Use equal reads per file (min of max possible reads across files) | off |
-| `--filter-similar` | Filter out chunks ≥90% similar to already-kept; oversample and refill; log warnings if target not reached | off |
-| `--similarity-threshold` | Max BLASTN percent identity for "similar" | 90 |
-| `--oversample-factor` | When `--filter-similar`: generate up to this many times target before filtering | 2.0 |
-| `--train-test-split` | Train percentage (e.g. 80 → 80% train, 20% test); test sequences similar to train are removed | off |
-| `--train-test-similarity-threshold` | Remove from test if ≥ this % identity to train | 90 |
-| `--accessions-file` | For download step: load accession IDs from JSON (reproducibility; skip NCBI search) | off |
-| `--save-accessions` | For download step: save accession list and UTC timestamp to JSON after searching | off |
-| `--run-blastn-filter` | Run BLASTN (non-viral vs viral) and exclude EVE regions when chunking | off |
-| `--run-seeker` | Run Seeker (phage/bacteria prediction) on the metagenome FASTA after chunking | off |
-| `--forbid-ambiguous` | Exclude chunks containing non-ACGT characters (e.g. N) | off |
-
-### Balanced mode
-
-Bacterial genomes are much longer than viral ones, so without a cap you get many more bacterial than viral reads. Use **`--balanced`** so each genome file contributes the same number of reads: the tool scans each file’s length, computes max possible reads per file (`total_bases // sequence_length`), and uses the **minimum** of those as the cap for every file.
-
-```bash
-metagenome-generator chunk --input output/downloaded --output metagenome.fasta --output-dir output/metagenome --sequence-length 250 --balanced
-```
-
-You’ll see a short report (e.g. `bacterial_1: 3743357 bp -> max 14973 reads (250 nt)`) and the chosen cap (e.g. `Balanced: using 34 reads per file`).
-
-### Example with custom paths
-
-```bash
-metagenome-generator pipeline \
-  --num-organisms 5 \
-  --output-dir data \
-  --output metagenome.fasta \
-  --sequence-length 250 \
-  --reads-per-organism 500
-```
-
-Results go under `data/downloaded/`, `data/metagenome/metagenome.fasta`, etc.
-
-Output headers look like `bacterial_1_chunk_0`, `viral_2_chunk_3`, etc.
-
-### Seeker: phage/bacteria prediction
-
-After building a metagenome you can run [Seeker](https://github.com/gussow/seeker) to label each read as phage or bacteria and export predicted phage reads. Seeker must be installed in a separate conda env (e.g. `seeker`, Python 3.7). Use the `seeker` subcommand or add `--run-seeker` to the pipeline.
+Run [Seeker](https://github.com/gussow/seeker) on a metagenome FASTA to label reads and export predicted phage reads. Seeker must be in a separate conda env (e.g. `seeker`).
 
 ```bash
 metagenome-generator seeker --input output/metagenome/metagenome.fasta --output-dir output/seeker --conda-env seeker
 ```
 
-| Argument | Description | Default |
-|----------|-------------|---------|
-| `--input` | Metagenome FASTA (e.g. from chunk or pipeline) | *(required)* |
-| `--output-dir` | Directory for outputs | `output` |
-| `--threshold` | Score threshold for phage (0–1) | 0.5 |
-| `--conda-env` | Conda env for `predict-metagenome` | `seeker` |
-| `--min-length` | Drop reads shorter than this (Seeker needs ≥200 nt) | 200 |
+Or add `--run-seeker` to the pipeline.
 
-**Output files**
+---
 
-| File | When created | Meaning |
-|------|----------------|--------|
-| `*.seeker_predictions.tsv` | Always | Per-read predictions: `name`, `prediction` (Phage/Bacteria), `score` (0–1). |
-| `*.seeker_phage.fasta` | Always | Reads with score ≥ threshold (predicted phage). |
-| `*.seeker_filtered_min200.fasta` | Only if some reads were &lt;200 nt | Length-filtered input actually sent to Seeker. Omitted when all reads are already ≥200 nt. |
+### More options (reference)
 
-### Variable-length contigs (training-style)
+- **Variable-length contigs:** `--min-contig-length 300 --max-contig-length 2000` (with `--balanced`, `--seed`).
+- **Down-sample negatives:** Chunk viral first, then chunk non-viral with `--cap-total-reads <viral_count>`.
+- **Similarity filtering:** `--filter-similar`, `--similarity-threshold 90`, `--oversample-factor 2`.
+- **Train/test split (no similarity overlap):** `--train-test-split 80`, `--train-test-similarity-threshold 90`; outputs `*_train.fasta` and `*_test.fasta`.
+- **Balanced mode:** `--balanced` uses the same read count per genome (min across files).
+- **Logging:** Pipeline writes `output-dir/logs/pipeline.log` (accessions, BLASTN stats, similarity filtering).
 
-To simulate variable-length metagenomic contigs (e.g. 300–2000 bp, uniform distribution), use `--min-contig-length` and `--max-contig-length` instead of a fixed `--sequence-length`:
+Full argument lists: `metagenome-generator <command> --help`.
 
-```bash
-metagenome-generator chunk --input output/downloaded --output metagenome_var.fasta --output-dir output/metagenome \
-  --min-contig-length 300 --max-contig-length 2000 --balanced --seed 42
-```
-
-Use `--seed` for reproducible sampling. Balanced mode uses the mean contig length to estimate max reads per file.
-
-### Down-sampling negative to match positive
-
-For training data, non-viral reads are often down-sampled to match the virus set size. Chunk the positive (viral) set first, then chunk the negative set with `--cap-total-reads` set to the viral read count:
-
-```bash
-metagenome-generator chunk --input output/downloaded --output viral.fasta --output-dir output/metagenome --balanced --seed 42
-# Get viral read count: grep -c ">" output/metagenome/viral.fasta
-metagenome-generator chunk --input output/downloaded --output negative.fasta --output-dir output/metagenome \
-  --balanced --cap-total-reads 500 --seed 42
-```
-
-Use the viral read count (e.g. `grep -c ">" output/metagenome/viral.fasta`) as `--cap-total-reads` for the negative run.
-
-### Similarity filtering within the dataset
-
-To avoid redundant training data, chunks that are too similar (e.g. ≥90% identity over most of the sequence) can be removed. The tool generates more chunks than needed (oversample), then keeps only sequences that are not ≥90% similar to any already-kept sequence (BLASTN), and refills by generating more chunks (different seed) until the target count is reached or max rounds.
-
-```bash
-metagenome-generator chunk --input output/downloaded --output metagenome.fasta --output-dir output/metagenome \
-  --balanced --filter-similar --similarity-threshold 90 --oversample-factor 2 --seed 42
-```
-
-Warnings are written to the log (and stderr) if the dataset cannot be fully created after filtering (e.g. not enough unique sequences).
-
-### Train-test split
-
-The final metagenome can be split into train and test sets. The split percentage is the **train** share (e.g. 80 → 80% train, 20% test). After the split, any test sequence that is too similar to any train sequence (BLASTN, threshold set by `--train-test-similarity-threshold`) is **removed from the test set** so train and test stay non-overlapping by similarity.
-
-```bash
-metagenome-generator chunk --input output/downloaded --output metagenome.fasta --output-dir output/metagenome \
-  --balanced --train-test-split 80 --train-test-similarity-threshold 90 --seed 42
-```
-
-Output: `metagenome_train.fasta` and `metagenome_test.fasta` (test may have fewer sequences after similarity removal).
-
-Pipeline:
-
-```bash
-metagenome-generator pipeline --output-dir output --balanced --train-test-split 80 --train-test-similarity-threshold 90 --seed 42
-```
-
-| Flag | Description | Default |
-|------|-------------|---------|
-| `--train-test-split` | Train percentage (0–100); rest is test | off |
-| `--train-test-similarity-threshold` | Remove from test if ≥ this % identity to any train sequence | 90 |
-| `--train-test-blast-threads` | BLAST threads for test-vs-train similarity (speed) | 4 |
-| `--train-test-blast-batch-size` | Test sequences per BLAST run (larger = fewer runs) | 2000 |
-
-**What the train-test BLAST step does:** After splitting into train and test, the tool builds a BLAST database from the train set and runs BLAST (query = test sequences) to find any test sequence that is ≥ threshold similar to any train sequence; those are removed from the test set so train and test do not share near-identical sequences. **Optimizations** to keep this fast: (1) **megablast** task instead of default blastn (designed for high-identity, much faster), (2) **batched** test sequences (e.g. 2000 per run to reduce the number of BLAST invocations), (3) **multi-threaded** BLAST (`-num_threads`). You can tune `--train-test-blast-threads` and `--train-test-blast-batch-size` if needed.
-
-### Logging
-
-When running the **pipeline**, a log file is written to `output-dir/logs/pipeline.log`. It records:
-
-- **Download step:** Accession numbers and origin (bacterial, viral, archaea, plasmid) for each downloaded genome; failures.
-- **BLASTN filter:** Which files were BLASTed; number of sequences with EVE hits (excluded from chunking).
-- **Chunk / similarity filter:** Generated vs removed vs kept counts; warnings when the target count could not be reached after similarity filtering.
-
-Use this file to audit runs and debug issues (e.g. dataset too small after similarity filtering).
-
-### Training-data design (methods alignment)
-
-Task-specific training sets often combine:
-
-- **Positive (virus):** RefSeq viral genomes; optionally by realm (Adnaviria, Duplodnaviria, Monodnaviria, Riboviria, etc.) or external sets (e.g. VirSorter2).
-- **Negative (non-viral):** Prokaryotes (bacteria, archaea), plasmids, and optionally eukaryotes (fungi, protozoa, Insecta) as challenging negatives.
-
-This pipeline supports:
-
-| Method step | Supported how |
-|-------------|----------------|
-| Multiple negative groups | Download with `--num-archaea`, `--num-plasmid`; chunk from one dir (all prefixes) or run chunk per group. |
-| Equal reads per group | `--balanced` (per-file cap). |
-| Variable-length contigs (300–2000 bp) | `--min-contig-length 300 --max-contig-length 2000`. |
-| Down-sample negative to viral size | Chunk viral, then chunk non-viral with `--cap-total-reads <viral_count> --seed`. |
-| Train/test split (e.g. 9:1 per taxon) | Not built-in; split genome lists or output FASTAs by group (e.g. with a small script) before or after chunking. |
-| BLASTN to remove endogenous viral elements | **Built-in:** `blastn-filter` subcommand (or `pipeline --run-blastn-filter`). Non-viral vs viral BLASTN; chunks overlapping hits are excluded via `chunk --eve-intervals`. |
-| Similarity filtering (e.g. 90% max) | **Built-in:** `chunk --filter-similar` (or `pipeline --filter-similar`). Oversample, drop chunks similar to already-kept (BLASTN), refill; warnings in log if target not reached. |
-| Train-test split (no similarity overlap) | **Built-in:** `chunk --train-test-split PCT` (or `pipeline --train-test-split PCT`). Split by percentage; remove from test any sequence ≥ threshold similar to train (`--train-test-similarity-threshold`). |
-| Temporal train/test split (by NCBI CreateDate) | **Built-in:** `temporal-split` subcommand. Split accessions into train (CreateDate &lt; date) and test (≥ date); output two JSONs for use with `download --accessions-file`. Uses per-accession CreateDate from snapshot when present (per-category or legacy format). |
-
-Realm-level viral taxonomy (RefSeq) can be approximated by refining the viral query in `ncbi_search.py` (e.g. by taxon name or using NCBI’s taxonomy filters).
+---
 
 ## Project structure
 
-Standard Python package layout for publishing:
-
 ```
 MetagenomeGenerator/
-├── pyproject.toml          # Build and metadata (PEP 517/621)
+├── pyproject.toml
 ├── README.md
 ├── LICENSE
 ├── environment.yml        # Optional conda env with BLAST+
-├── main.py                # Launcher (calls metagenome_generator.cli)
-├── src/
-│   └── metagenome_generator/
-│       ├── __init__.py
-│       ├── __main__.py     # python -m metagenome_generator
-│       ├── cli.py          # CLI entry point
-│       ├── download_genomes.py
-│       ├── ncbi_search.py
-│       ├── accession_snapshot.py
-│       ├── chunk_genomes.py
-│       ├── genome_layout.py
-│       ├── blastn_filter.py
-│       ├── similarity_filter.py
-│       ├── temporal_split.py
-│       └── seeker_wrapper.py
-├── snapshots/              # Default output for snapshot (date-stamped JSON)
-└── data/                   # Optional; user data
+├── main.py
+├── src/metagenome_generator/
+│   ├── cli.py
+│   ├── download_genomes.py
+│   ├── ncbi_search.py
+│   ├── accession_snapshot.py
+│   ├── chunk_genomes.py
+│   ├── genome_layout.py
+│   ├── blastn_filter.py
+│   ├── similarity_filter.py
+│   ├── temporal_split.py
+│   └── seeker_wrapper.py
+├── snapshots/              # Default snapshot output (date-stamped JSON)
+└── working_directory/      # Suggested location for runs (gitignored)
 ```
 
 After `pip install -e .`, the `metagenome-generator` console script is available. Programmatic use: `from metagenome_generator import build_metagenome, download_genomes, load_accessions, validate_genome_dir`.
 
+---
+
 ## Notes
 
-- NCBI rate limits apply; the download and snapshot steps add short delays between requests. Failed fetches are retried up to 3 times with backoff.
-- Genome selection uses RefSeq and length filters; edit `DEFAULT_QUERIES` in `ncbi_search.py` to change criteria (used by both `download` and `snapshot`).
+- NCBI rate limits apply; requests are delayed and retried (up to 3 times with backoff).
+- Genome selection uses RefSeq and length filters; edit `DEFAULT_QUERIES` in `ncbi_search.py` to change criteria.
 - For local runs and outputs, use a dedicated working directory; see `working_directory/README.md`.
