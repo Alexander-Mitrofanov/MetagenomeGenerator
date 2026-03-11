@@ -25,6 +25,19 @@ OUTPUT_DIR_SEEKER = "seeker"
 OUTPUT_DIR_LOGS = "logs"
 
 
+def _parse_abundance_profile(s: str | None) -> dict[str, float] | None:
+    """Parse KEY=VAL,KEY2=VAL2 into dict. Returns None if s is None or empty."""
+    if not s or not s.strip():
+        return None
+    out: dict[str, float] = {}
+    for part in s.split(","):
+        part = part.strip()
+        if "=" in part:
+            k, v = part.split("=", 1)
+            out[k.strip()] = float(v.strip())
+    return out if out else None
+
+
 def _add_download_subparser(subparsers) -> None:
     p = subparsers.add_parser(
         "download",
@@ -227,6 +240,20 @@ def _add_chunk_subparser(subparsers) -> None:
         default=None,
         metavar="PATH",
         help="Extra FASTA of viral sequences (e.g. metavirome contigs) to chunk and merge with RefSeq viral chunks. Multi-record OK.",
+    )
+    p.add_argument(
+        "--abundance-profile",
+        type=str,
+        default=None,
+        metavar="KEY=VAL,...",
+        help="Per-category read weights, e.g. bacterial=0.5,viral=2,archaea=1,plasmid=1. Scales reads per file by category.",
+    )
+    p.add_argument(
+        "--abundance-distribution",
+        type=str,
+        default=None,
+        choices=["exponential"],
+        help="Per-genome abundance: exponential draws weights from Exp(1); use --seed for reproducibility.",
     )
     p.set_defaults(func=_run_chunk)
 
@@ -460,6 +487,20 @@ def _add_pipeline_subparser(subparsers) -> None:
         default=None,
         metavar="PATH",
         help="Extra FASTA of viral sequences (e.g. metavirome contigs) to chunk and merge with RefSeq viral chunks.",
+    )
+    p.add_argument(
+        "--abundance-profile",
+        type=str,
+        default=None,
+        metavar="KEY=VAL,...",
+        help="Per-category read weights, e.g. bacterial=0.5,viral=2,archaea=1,plasmid=1.",
+    )
+    p.add_argument(
+        "--abundance-distribution",
+        type=str,
+        default=None,
+        choices=["exponential"],
+        help="Per-genome abundance: exponential weights (use --seed for reproducibility).",
     )
     p.set_defaults(func=_run_pipeline)
 
@@ -707,6 +748,8 @@ def _run_chunk(args) -> None:
     extra_viral = getattr(args, "extra_viral_fasta", None)
     if extra_viral is not None and not extra_viral.exists():
         raise SystemExit(f"--extra-viral-fasta not found: {extra_viral}")
+    abundance_profile = _parse_abundance_profile(getattr(args, "abundance_profile", None))
+    abundance_dist = getattr(args, "abundance_distribution", None)
     count = build_metagenome(
         args.input,
         out_path,
@@ -721,6 +764,8 @@ def _run_chunk(args) -> None:
         substitution_rate=sub_rate,
         indel_rate=indel_r,
         extra_viral_fasta=extra_viral,
+        abundance_profile=abundance_profile,
+        abundance_distribution=abundance_dist,
     )
     print(f"Wrote {count} sequences to {out_path}")
 
@@ -863,6 +908,8 @@ def _run_pipeline(args) -> None:
     extra_viral = getattr(args, "extra_viral_fasta", None)
     if extra_viral is not None and not extra_viral.exists():
         raise SystemExit(f"--extra-viral-fasta not found: {extra_viral}")
+    abundance_profile = _parse_abundance_profile(getattr(args, "abundance_profile", None))
+    abundance_dist = getattr(args, "abundance_distribution", None)
     result = build_metagenome(
         download_dir,
         out_path,
@@ -883,6 +930,8 @@ def _run_pipeline(args) -> None:
         substitution_rate=sub_rate,
         indel_rate=indel_r,
         extra_viral_fasta=extra_viral,
+        abundance_profile=abundance_profile,
+        abundance_distribution=abundance_dist,
     )
     if do_train_test_split:
         _count, records = result

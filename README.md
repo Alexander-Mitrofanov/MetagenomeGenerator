@@ -33,6 +33,7 @@ Metagenome Generator produces FASTA training data for viral vs. prokaryotic (or 
 | **Mutation simulation** | Per-base substitution and optional indel rates; test classifier robustness to sequencing error or divergence (e.g. 1% substitutions). |
 | **Extra viral FASTA** | Merge user-provided viral sequences (e.g. metavirome contigs) with RefSeq viral chunks in one run. |
 | **Genome quality / completeness** | Restrict to complete genomes only (exclude WGS/draft) via `--complete-only` in snapshot and download; uses NCBI `complete[Properties]` and `NOT WGS[Properties]`. |
+| **Abundance / coverage model** | Per-category weights (`--abundance-profile`) or per-genome exponential weights (`--abundance-distribution exponential`); use `--seed` for reproducibility. |
 | **Ambiguous-base filter** | Exclude reads containing non-ACGT characters (e.g. N). |
 | **Seeker integration** | Run Seeker (phage/bacteria prediction) on the generated metagenome from the same workflow. |
 
@@ -177,6 +178,8 @@ metagenome-generator chunk \
 | `--substitution-rate` | Per-base substitution rate (0–1) for robustness benchmarks (e.g. 0.01). |
 | `--indel-rate` | Per-base indel rate (0–1); may change read length. |
 | `--extra-viral-fasta` | FASTA of additional viral sequences (e.g. metavirome); chunked and merged with RefSeq viral. |
+| `--abundance-profile` | Per-category read weights, e.g. `bacterial=0.5,viral=2,archaea=1,plasmid=1`. |
+| `--abundance-distribution` | `exponential`: per-genome weights from Exp(1); use `--seed` for reproducibility. |
 | `--filter-similar` | Drop reads ≥90% similar to already-kept; oversample and refill to target. |
 | `--train-test-split` | Write train/test FASTAs (e.g. 80% train); remove from test reads similar to train. |
 
@@ -195,7 +198,7 @@ metagenome-generator pipeline \
   --reads-per-organism 1000
 ```
 
-Pipeline options include all chunk options plus: `--run-blastn-filter`, `--run-seeker`, `--accessions-file`, `--complete-only`, `--forbid-ambiguous`, `--substitution-rate`, `--indel-rate`, `--extra-viral-fasta`. See `metagenome-generator pipeline --help`.
+Pipeline options include all chunk options plus: `--run-blastn-filter`, `--run-seeker`, `--accessions-file`, `--complete-only`, `--forbid-ambiguous`, `--substitution-rate`, `--indel-rate`, `--extra-viral-fasta`, `--abundance-profile`, `--abundance-distribution`. See `metagenome-generator pipeline --help`.
 
 ---
 

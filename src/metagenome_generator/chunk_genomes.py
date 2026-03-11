@@ -17,9 +17,63 @@ from Bio import SeqIO
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 
-from .genome_layout import iter_genome_fastas
+from .genome_layout import (
+    ARCHAEA_PREFIX,
+    BACTERIA_PREFIX,
+    PLASMID_PREFIX,
+    VIRUS_PREFIX,
+    iter_genome_fastas,
+)
 
 logger = logging.getLogger(__name__)
+
+# Category name from file prefix stem (e.g. bacterial_1 -> bacterial)
+_PREFIX_TO_CATEGORY: list[tuple[str, str]] = [
+    ("bacterial", BACTERIA_PREFIX),
+    ("viral", VIRUS_PREFIX),
+    ("archaea", ARCHAEA_PREFIX),
+    ("plasmid", PLASMID_PREFIX),
+]
+
+
+def _category_from_prefix(prefix: str) -> str:
+    """Return category name for a genome file prefix (bacterial_1 -> bacterial)."""
+    for category, p in _PREFIX_TO_CATEGORY:
+        if prefix.startswith(p) or prefix == p.rstrip("_"):
+            return category
+    return "other"
+
+
+def _compute_read_limits(
+    prefixes_and_files: list[tuple[str, Path]],
+    base_reads_per_file: int,
+    *,
+    abundance_profile: dict[str, float] | None = None,
+    abundance_distribution: str | None = None,
+    seed: int | None = None,
+) -> list[int]:
+    """Return one read limit per file. If no abundance, all limits = base_reads_per_file."""
+    n = len(prefixes_and_files)
+    if n == 0:
+        return []
+    if abundance_profile:
+        limits = []
+        for prefix, _ in prefixes_and_files:
+            cat = _category_from_prefix(prefix)
+            w = abundance_profile.get(cat, 1.0)
+            limits.append(max(1, int(base_reads_per_file * w)))
+        return limits
+    if abundance_distribution == "exponential":
+        rng = random.Random(seed)
+        weights = [rng.expovariate(1.0) for _ in range(n)]
+        total = sum(weights)
+        if total <= 0:
+            return [base_reads_per_file] * n
+        scale = n / total
+        limits = [max(1, int(base_reads_per_file * w * scale)) for w in weights]
+        return limits
+    return [base_reads_per_file] * n
+
 
 BASES = "ACGT"
 
@@ -307,6 +361,8 @@ def build_metagenome(
     max_refill_rounds: int = 3,
     return_records: bool = False,
     extra_viral_fasta: Path | None = None,
+    abundance_profile: dict[str, float] | None = None,
+    abundance_distribution: str | None = None,
 ) -> int | tuple[int, list[SeqRecord]]:
     """Build a metagenome FASTA from input_path. Fixed-length or variable-length (min_length–max_length) contigs.
 
@@ -318,6 +374,8 @@ def build_metagenome(
     If return_records is True, do not write to out_path and return (count, list[SeqRecord]) for train-test split.
     If extra_viral_fasta is set, chunks from that FASTA (multi-record, e.g. metavirome contigs) are merged in
     with prefix extra_viral_0, extra_viral_1, ... using the same length and mutation settings.
+    If abundance_profile is set (e.g. {"bacterial": 0.5, "viral": 2.0}), scale reads per file by category.
+    If abundance_distribution == "exponential", assign per-genome weights from Exp(1) (use seed for reproducibility).
     """
     from .similarity_filter import filter_by_similarity, filter_candidates_against_kept
 
@@ -344,19 +402,30 @@ def build_metagenome(
     reads_per_organism_gen = reads_per_organism
     if filter_similar and target_count is not None and target_count > 0:
         oversample_per_file = max(1, int(target_count * oversample_factor) // num_files)
-        # Use higher of (requested, oversample) so we have enough to filter; caller may have already capped for balance
         reads_per_organism_gen = max(reads_per_organism or 0, oversample_per_file)
         if reads_per_organism_gen == 0:
             reads_per_organism_gen = reads_per_organism
+
+    if reads_per_organism_gen is None:
+        read_limits: list[int | None] = [None] * num_files
+    else:
+        read_limits = _compute_read_limits(
+            prefixes_and_files,
+            reads_per_organism_gen,
+            abundance_profile=abundance_profile,
+            abundance_distribution=abundance_distribution,
+            seed=seed,
+        )
 
     all_chunks: list[SeqRecord] = []
     for i, (prefix, fp) in enumerate(prefixes_and_files):
         file_seed = (seed + i) if seed is not None else None
         file_mutation_rng = random.Random(seed + 10000 + i) if mutation_rng is not None else None
+        per_file_limit = read_limits[i]
         chunks = _collect_chunks_for_file(
             fp,
             sequence_length,
-            reads_per_organism_gen,
+            per_file_limit,
             prefix,
             min_length=min_length,
             max_length=max_length,
@@ -417,7 +486,7 @@ def build_metagenome(
                 chunks = _collect_chunks_for_file(
                     fp,
                     sequence_length,
-                    reads_per_organism_gen,
+                    read_limits[i],
                     prefix,
                     min_length=min_length,
                     max_length=max_length,
