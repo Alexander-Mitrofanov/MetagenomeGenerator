@@ -256,3 +256,44 @@ def filter_candidates_against_kept(
             if rec.id not in similar_ids:
                 passing.append(rec)
     return passing
+
+
+def filter_test_against_train(
+    train_fasta: Path,
+    test_fasta: Path,
+    output_fasta: Path,
+    *,
+    similarity_threshold: float = 90.0,
+    min_coverage: float = 0.8,
+    work_dir: Path | None = None,
+    batch_size: int = 2000,
+    num_threads: int = 4,
+) -> tuple[int, int]:
+    """Load train and test FASTAs; remove from test any read >= similarity_threshold similar to train; write filtered test.
+
+    Returns (n_removed, n_kept). Use for temporal split: after building train and test metagenomes separately,
+    run this to drop test reads that are highly similar to train (e.g. different strains of same species).
+    Requires BLAST+.
+    """
+    train_records = list(SeqIO.parse(train_fasta, "fasta"))
+    test_records = list(SeqIO.parse(test_fasta, "fasta"))
+    if not train_records:
+        SeqIO.write(test_records, output_fasta, "fasta")
+        return 0, len(test_records)
+    if not test_records:
+        output_fasta.write_text("")
+        return 0, 0
+    filtered = filter_candidates_against_kept(
+        test_records,
+        train_records,
+        similarity_threshold=similarity_threshold,
+        min_coverage=min_coverage,
+        batch_size=batch_size,
+        work_dir=work_dir,
+        num_threads=num_threads,
+        use_megablast=True,
+    )
+    n_removed = len(test_records) - len(filtered)
+    output_fasta.parent.mkdir(parents=True, exist_ok=True)
+    SeqIO.write(filtered, output_fasta, "fasta")
+    return n_removed, len(filtered)

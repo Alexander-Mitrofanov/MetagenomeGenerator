@@ -15,6 +15,7 @@ from .chunk_genomes import build_metagenome, get_file_stats, split_train_test_an
 from .seeker_wrapper import SEEKER_MIN_LENGTH, run_seeker
 from .blastn_filter import export_eve_regions_fasta, load_eve_intervals, run_blastn_from_dirs
 from .genome_layout import validate_genome_dir
+from .similarity_filter import filter_test_against_train
 from .temporal_split import run_temporal_split, run_temporal_split_info
 from .viral_taxonomy import run_viral_taxonomy
 
@@ -696,6 +697,76 @@ def _add_temporal_split_info_subparser(subparsers) -> None:
     p.set_defaults(func=_run_temporal_split_info)
 
 
+def _add_filter_test_against_train_subparser(subparsers) -> None:
+    p = subparsers.add_parser(
+        "filter-test-against-train",
+        help="Remove from test FASTA any read that is highly similar to train (BLAST). Use after temporal split to avoid strain leakage.",
+    )
+    p.add_argument(
+        "--train-fasta",
+        type=Path,
+        required=True,
+        metavar="PATH",
+        help="Train metagenome FASTA (e.g. from chunk with train accessions).",
+    )
+    p.add_argument(
+        "--test-fasta",
+        type=Path,
+        required=True,
+        metavar="PATH",
+        help="Test metagenome FASTA (e.g. from chunk with test accessions).",
+    )
+    p.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        metavar="PATH",
+        help="Output path for filtered test FASTA (test reads similar to train are removed).",
+    )
+    p.add_argument(
+        "--similarity-threshold",
+        type=float,
+        default=90.0,
+        help="Remove test reads with BLAST identity >= this (%%). Default: 90",
+    )
+    p.add_argument(
+        "--min-coverage",
+        type=float,
+        default=0.8,
+        help="Min fraction of query length in alignment to count as similar. Default: 0.8",
+    )
+    p.add_argument(
+        "--threads",
+        type=int,
+        default=4,
+        help="BLAST threads. Default: 4",
+    )
+    p.add_argument(
+        "--batch-size",
+        type=int,
+        default=2000,
+        help="Test sequences per BLAST batch. Default: 2000",
+    )
+    p.set_defaults(func=_run_filter_test_against_train)
+
+
+def _run_filter_test_against_train(args) -> None:
+    for path in (args.train_fasta, args.test_fasta):
+        if not path.exists():
+            raise SystemExit(f"File not found: {path}")
+    n_removed, n_kept = filter_test_against_train(
+        args.train_fasta,
+        args.test_fasta,
+        args.output,
+        similarity_threshold=args.similarity_threshold,
+        min_coverage=args.min_coverage,
+        num_threads=args.threads,
+        batch_size=args.batch_size,
+    )
+    print(f"Removed {n_removed} test reads (similar to train at >={args.similarity_threshold}%%); kept {n_kept}.")
+    print(f"Wrote filtered test to {args.output}")
+
+
 def _add_viral_taxonomy_subparser(subparsers) -> None:
     p = subparsers.add_parser(
         "viral-taxonomy",
@@ -1093,7 +1164,7 @@ def _run_temporal_split(args) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Metagenome simulator (download, snapshot, migrate-snapshot, chunk, pipeline, blastn-filter, viral-taxonomy, seeker, temporal-split, temporal-split-info)",
+        description="Metagenome simulator (download, snapshot, migrate-snapshot, chunk, pipeline, blastn-filter, viral-taxonomy, seeker, temporal-split, temporal-split-info, filter-test-against-train)",
     )
     subparsers = parser.add_subparsers(dest="command")
     subparsers.required = True
@@ -1107,6 +1178,7 @@ def main() -> None:
     _add_seeker_subparser(subparsers)
     _add_temporal_split_subparser(subparsers)
     _add_temporal_split_info_subparser(subparsers)
+    _add_filter_test_against_train_subparser(subparsers)
     _add_viral_taxonomy_subparser(subparsers)
 
     args = parser.parse_args()

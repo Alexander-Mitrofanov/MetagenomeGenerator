@@ -238,9 +238,17 @@ metagenome-generator chunk --input output/downloaded --output metagenome.fasta -
 
 ---
 
-### Temporal train/test split (by NCBI CreateDate)
+### Train/test split and similarity
 
-**Purpose:** Split accessions into train (CreateDate before a cutoff) and test (on or after). Use to evaluate classifiers on “novel” sequences (e.g. DeepVirFinder-style evaluation).
+The tool supports two evaluation patterns. In both, a **similarity check** (BLAST: remove from test any read ≥ threshold similar to train) is important. For temporal split you run it as a dedicated step after building train and test metagenomes; for percentage split it is applied automatically.
+
+**Best practices (references):** Temporal holdout is recommended for viral/metagenomic classifiers so the test set reflects “novel” sequences not seen at training time. DeepVirFinder (Ren et al., *Bioinformatics* 2020; [PubMed 34084563](https://pubmed.ncbi.nlm.nih.gov/34084563/)) trained on viral RefSeq discovered **before May 2015** and evaluated on sequences **after May 2015**; VirFinder (Ren et al., *Microbiome* 2017) used a similar temporal split (before/after Jan 2014). Splitting by date alone is not enough: **different strains or closely related genomes** (e.g. same species, different isolate) can appear in both train and test and inflate metrics. Removing test reads that are highly similar to train is therefore a best practice; the tool provides this for both workflows below.
+
+---
+
+#### Option A — Temporal split (by NCBI CreateDate)
+
+Split **accessions** by submission date so train and test are disjoint in time. Build two separate metagenomes, then **run the similarity filter** so that test reads that are highly similar to train (e.g. different strains of the same species) are removed. **This step is important:** without it, closely related sequences can appear in both sets and inflate evaluation metrics.
 
 **Step 1 — Preview counts (no files written):**
 
@@ -258,7 +266,41 @@ metagenome-generator temporal-split \
   --split-date 2019-06-01
 ```
 
-Then run `download` or `pipeline` with `--accessions-file train_<basename>.json` and `--accessions-file test_<basename>.json` to build separate datasets.
+**Step 3 — Build train and test datasets:**
+
+Run `download` (or `pipeline`) twice: once with `--accessions-file train_<basename>.json`, once with `--accessions-file test_<basename>.json`, into separate output dirs. Chunk each to get `train_metagenome.fasta` and `test_metagenome.fasta`.
+
+**Step 4 — Filter test against train (similarity check; required for rigorous evaluation):**
+
+Remove from the test set any read that is ≥ threshold similar to a train read (BLAST). This avoids counting different strains or near-duplicates as “novel” test sequences.
+
+```bash
+metagenome-generator filter-test-against-train \
+  --train-fasta output_train/metagenome/train_metagenome.fasta \
+  --test-fasta output_test/metagenome/test_metagenome.fasta \
+  --output output_test/metagenome/test_metagenome_filtered.fasta \
+  --similarity-threshold 90
+```
+
+Use `test_metagenome_filtered.fasta` as your test set for evaluation. Options: `--min-coverage` (default 0.8), `--threads`, `--batch-size`. Requires BLAST+.
+
+---
+
+#### Option B — Percentage split with similarity check (single metagenome)
+
+Build **one** metagenome, then split the resulting reads by percentage (e.g. 80% train, 20% test). The tool **removes from the test set any read that is ≥ similarity threshold** (default 90% identity over 80% of length) similar to a train read (BLAST of test vs train). This avoids inflated metrics from near-duplicate train/test sequences.
+
+Use with **chunk** or **pipeline**:
+
+```bash
+metagenome-generator chunk --input output/downloaded --output metagenome.fasta --output-dir output/metagenome \
+  --sequence-length 250 --reads-per-organism 1000 \
+  --train-test-split 80 --seed 42
+```
+
+Output: `metagenome_train.fasta` and `metagenome_test.fasta`; test reads similar to train are dropped (see log). Options: `--train-test-similarity-threshold` (default 90), `--train-test-blast-threads`, `--train-test-blast-batch-size`.
+
+In the **pipeline**, add `--train-test-split 80` (and optionally `--seed 42`); the same similarity check runs after the single metagenome is built.
 
 ---
 
@@ -305,6 +347,7 @@ Or add `--run-seeker` to the pipeline.
 | `snapshot` | Save full accession catalog to JSON (no downloads). |
 | `temporal-split-info` | Show train/test counts for a split date (no files written). |
 | `temporal-split` | Write train and test accession JSONs by CreateDate. |
+| `filter-test-against-train` | Remove from test FASTA reads similar to train (BLAST). **Use after temporal split** for rigorous evaluation. |
 | `migrate-snapshot` | Convert legacy snapshot to per-category metadata format. |
 | `blastn-filter` | BLAST non-viral vs viral; write EVE intervals for chunk and optional provirus/EVE FASTA. |
 | `viral-taxonomy` | Fetch viral taxonomy from NCBI; write viral_1→group JSON for `--balance-viral-by-taxonomy`. |
