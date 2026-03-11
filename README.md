@@ -34,6 +34,7 @@ Metagenome Generator produces FASTA training data for viral vs. prokaryotic (or 
 | **Extra viral FASTA** | Merge user-provided viral sequences (e.g. metavirome contigs) with RefSeq viral chunks in one run. |
 | **Genome quality / completeness** | Restrict to complete genomes only (exclude WGS/draft) via `--complete-only` in snapshot and download; uses NCBI `complete[Properties]` and `NOT WGS[Properties]`. |
 | **Abundance / coverage model** | Per-category weights (`--abundance-profile`) or per-genome exponential weights (`--abundance-distribution exponential`); use `--seed` for reproducibility. |
+| **Taxonomy-aware viral balancing** | Balance viral reads by taxonomy group (e.g. family/realm) so under-represented groups contribute equally; `viral-taxonomy` fetches NCBI taxonomy and writes prefix→group JSON. |
 | **Ambiguous-base filter** | Exclude reads containing non-ACGT characters (e.g. N). |
 | **Seeker integration** | Run Seeker (phage/bacteria prediction) on the generated metagenome from the same workflow. |
 
@@ -180,6 +181,8 @@ metagenome-generator chunk \
 | `--extra-viral-fasta` | FASTA of additional viral sequences (e.g. metavirome); chunked and merged with RefSeq viral. |
 | `--abundance-profile` | Per-category read weights, e.g. `bacterial=0.5,viral=2,archaea=1,plasmid=1`. |
 | `--abundance-distribution` | `exponential`: per-genome weights from Exp(1); use `--seed` for reproducibility. |
+| `--viral-taxonomy` | JSON mapping viral_1, viral_2, ... to taxonomy group (from `viral-taxonomy` command). |
+| `--balance-viral-by-taxonomy` | Balance viral reads so each taxonomy group contributes equally (requires `--viral-taxonomy`). |
 | `--filter-similar` | Drop reads ≥90% similar to already-kept; oversample and refill to target. |
 | `--train-test-split` | Write train/test FASTAs (e.g. 80% train); remove from test reads similar to train. |
 
@@ -211,6 +214,27 @@ metagenome-generator snapshot
 ```
 
 With metadata (default), each category stores `{accession, create_date, title}` per entry for temporal split and auditing. Use `--no-metadata` for lists only. Use `--complete-only` to restrict the catalog to complete genomes only (exclude WGS/draft); then use that snapshot with `--accessions-file` for reproducible complete-only downloads. Convert legacy snapshots with `metagenome-generator migrate-snapshot <path>`.
+
+---
+
+### Viral taxonomy (for taxonomy-aware balancing)
+
+**Purpose:** Fetch viral taxonomy from NCBI (family or realm) and write a JSON mapping `viral_1`, `viral_2`, ... to group name. Use this file with `chunk` or `pipeline` and `--balance-viral-by-taxonomy` so each viral taxonomy group contributes equally to the metagenome.
+
+```bash
+metagenome-generator viral-taxonomy \
+  --accessions-file snapshots/accession_snapshot_2026-03-10.json \
+  --output output/viral_taxonomy.json \
+  --level family
+```
+
+Then chunk with balancing:
+
+```bash
+metagenome-generator chunk --input output/downloaded --output metagenome.fasta --output-dir output/metagenome \
+  --sequence-length 250 --reads-per-organism 1000 \
+  --viral-taxonomy output/viral_taxonomy.json --balance-viral-by-taxonomy
+```
 
 ---
 
@@ -283,6 +307,7 @@ Or add `--run-seeker` to the pipeline.
 | `temporal-split` | Write train and test accession JSONs by CreateDate. |
 | `migrate-snapshot` | Convert legacy snapshot to per-category metadata format. |
 | `blastn-filter` | BLAST non-viral vs viral; write EVE intervals for chunk and optional provirus/EVE FASTA. |
+| `viral-taxonomy` | Fetch viral taxonomy from NCBI; write viral_1→group JSON for `--balance-viral-by-taxonomy`. |
 | `seeker` | Run Seeker on a metagenome FASTA. |
 
 Full options: `metagenome-generator <command> --help`.
@@ -308,6 +333,7 @@ MetagenomeGenerator/
 │   ├── blastn_filter.py
 │   ├── similarity_filter.py
 │   ├── temporal_split.py
+│   ├── viral_taxonomy.py
 │   └── seeker_wrapper.py
 ├── snapshots/
 └── working_directory/

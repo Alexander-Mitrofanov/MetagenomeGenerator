@@ -16,6 +16,7 @@ from .seeker_wrapper import SEEKER_MIN_LENGTH, run_seeker
 from .blastn_filter import export_eve_regions_fasta, load_eve_intervals, run_blastn_from_dirs
 from .genome_layout import validate_genome_dir
 from .temporal_split import run_temporal_split, run_temporal_split_info
+from .viral_taxonomy import run_viral_taxonomy
 
 # Organized output layout (pipeline): one root dir with step-based subdirs for easy navigation.
 OUTPUT_DIR_DOWNLOADED = "downloaded"
@@ -254,6 +255,18 @@ def _add_chunk_subparser(subparsers) -> None:
         default=None,
         choices=["exponential"],
         help="Per-genome abundance: exponential draws weights from Exp(1); use --seed for reproducibility.",
+    )
+    p.add_argument(
+        "--viral-taxonomy",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="JSON mapping viral_1, viral_2, ... to taxonomy group (e.g. family). Use with --balance-viral-by-taxonomy.",
+    )
+    p.add_argument(
+        "--balance-viral-by-taxonomy",
+        action="store_true",
+        help="Balance viral reads by taxonomy group so each group contributes equally. Requires --viral-taxonomy.",
     )
     p.set_defaults(func=_run_chunk)
 
@@ -502,6 +515,18 @@ def _add_pipeline_subparser(subparsers) -> None:
         choices=["exponential"],
         help="Per-genome abundance: exponential weights (use --seed for reproducibility).",
     )
+    p.add_argument(
+        "--viral-taxonomy",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="JSON mapping viral_1, viral_2, ... to taxonomy group. Use with --balance-viral-by-taxonomy.",
+    )
+    p.add_argument(
+        "--balance-viral-by-taxonomy",
+        action="store_true",
+        help="Balance viral reads by taxonomy group (requires --viral-taxonomy).",
+    )
     p.set_defaults(func=_run_pipeline)
 
 
@@ -671,6 +696,52 @@ def _add_temporal_split_info_subparser(subparsers) -> None:
     p.set_defaults(func=_run_temporal_split_info)
 
 
+def _add_viral_taxonomy_subparser(subparsers) -> None:
+    p = subparsers.add_parser(
+        "viral-taxonomy",
+        help="Fetch viral taxonomy from NCBI and write viral_1 -> family (or realm) JSON for --viral-taxonomy / --balance-viral-by-taxonomy.",
+    )
+    p.add_argument(
+        "--accessions-file",
+        type=Path,
+        required=True,
+        metavar="PATH",
+        help="Input JSON with viral accession list (e.g. from snapshot).",
+    )
+    p.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        metavar="PATH",
+        help="Output JSON path (e.g. viral_taxonomy.json).",
+    )
+    p.add_argument(
+        "--level",
+        type=str,
+        default="family",
+        choices=["family", "realm"],
+        help="Taxonomy level to use as group. Default: family",
+    )
+    p.add_argument(
+        "--batch-size",
+        type=int,
+        default=100,
+        help="Batch size for NCBI elink/efetch. Default: 100",
+    )
+    p.set_defaults(func=_run_viral_taxonomy)
+
+
+def _run_viral_taxonomy(args) -> None:
+    if not args.accessions_file.exists():
+        raise SystemExit(f"--accessions-file not found: {args.accessions_file}")
+    run_viral_taxonomy(
+        args.accessions_file,
+        args.output,
+        level=args.level,
+        batch_size=args.batch_size,
+    )
+
+
 def _run_temporal_split_info(args) -> None:
     run_temporal_split_info(
         args.accessions_file,
@@ -750,6 +821,10 @@ def _run_chunk(args) -> None:
         raise SystemExit(f"--extra-viral-fasta not found: {extra_viral}")
     abundance_profile = _parse_abundance_profile(getattr(args, "abundance_profile", None))
     abundance_dist = getattr(args, "abundance_distribution", None)
+    viral_tax_path = getattr(args, "viral_taxonomy", None)
+    balance_viral = getattr(args, "balance_viral_by_taxonomy", False)
+    if balance_viral and (viral_tax_path is None or not viral_tax_path.exists()):
+        raise SystemExit("--balance-viral-by-taxonomy requires --viral-taxonomy PATH to an existing JSON file.")
     count = build_metagenome(
         args.input,
         out_path,
@@ -766,6 +841,8 @@ def _run_chunk(args) -> None:
         extra_viral_fasta=extra_viral,
         abundance_profile=abundance_profile,
         abundance_distribution=abundance_dist,
+        viral_taxonomy_json=viral_tax_path,
+        balance_viral_by_taxonomy=balance_viral,
     )
     print(f"Wrote {count} sequences to {out_path}")
 
@@ -910,6 +987,10 @@ def _run_pipeline(args) -> None:
         raise SystemExit(f"--extra-viral-fasta not found: {extra_viral}")
     abundance_profile = _parse_abundance_profile(getattr(args, "abundance_profile", None))
     abundance_dist = getattr(args, "abundance_distribution", None)
+    viral_tax_path = getattr(args, "viral_taxonomy", None)
+    balance_viral = getattr(args, "balance_viral_by_taxonomy", False)
+    if balance_viral and (viral_tax_path is None or not viral_tax_path.exists()):
+        raise SystemExit("--balance-viral-by-taxonomy requires --viral-taxonomy PATH to an existing JSON file.")
     result = build_metagenome(
         download_dir,
         out_path,
@@ -932,6 +1013,8 @@ def _run_pipeline(args) -> None:
         extra_viral_fasta=extra_viral,
         abundance_profile=abundance_profile,
         abundance_distribution=abundance_dist,
+        viral_taxonomy_json=viral_tax_path,
+        balance_viral_by_taxonomy=balance_viral,
     )
     if do_train_test_split:
         _count, records = result
@@ -1010,7 +1093,7 @@ def _run_temporal_split(args) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Metagenome simulator (download, snapshot, migrate-snapshot, chunk, pipeline, blastn-filter, seeker, temporal-split, temporal-split-info)",
+        description="Metagenome simulator (download, snapshot, migrate-snapshot, chunk, pipeline, blastn-filter, viral-taxonomy, seeker, temporal-split, temporal-split-info)",
     )
     subparsers = parser.add_subparsers(dest="command")
     subparsers.required = True
@@ -1024,6 +1107,7 @@ def main() -> None:
     _add_seeker_subparser(subparsers)
     _add_temporal_split_subparser(subparsers)
     _add_temporal_split_info_subparser(subparsers)
+    _add_viral_taxonomy_subparser(subparsers)
 
     args = parser.parse_args()
     args.func(args)

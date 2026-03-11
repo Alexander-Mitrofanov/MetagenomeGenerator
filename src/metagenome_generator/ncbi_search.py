@@ -8,7 +8,6 @@ and search so both modules stay in sync and avoid duplication.
 
 import os
 import time
-from pathlib import Path
 from typing import Callable
 
 from Bio import Entrez

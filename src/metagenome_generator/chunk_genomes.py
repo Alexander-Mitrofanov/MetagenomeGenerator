@@ -44,6 +44,66 @@ def _category_from_prefix(prefix: str) -> str:
     return "other"
 
 
+def _apply_viral_taxonomy_balance(
+    prefixes_and_files: list[tuple[str, Path]],
+    read_limits: list[int | None],
+    viral_taxonomy: dict[str, str],
+    *,
+    prefix_to_max_reads: dict[str, int] | None = None,
+    input_path: Path | None = None,
+    sequence_length: int = 0,
+    min_length: int | None = None,
+    max_length: int | None = None,
+) -> list[int | None]:
+    """Overwrite read_limits for viral files so each taxonomy group contributes equally.
+
+    viral_taxonomy: prefix -> group (e.g. viral_1 -> Herpesviridae). Viral files not in
+    the dict get limit unchanged. Non-viral files are unchanged.
+    When prefix_to_max_reads is provided, stats are not recomputed (avoids double get_file_stats).
+    """
+    if prefix_to_max_reads is None:
+        if input_path is None:
+            return read_limits
+        stats = get_file_stats(
+            input_path,
+            sequence_length,
+            min_length=min_length,
+            max_length=max_length,
+        )
+        if not stats:
+            return read_limits
+        prefix_to_max_reads = {p: max_r for p, _fp, _tb, max_r in stats}
+    # Group viral prefixes by taxonomy
+    groups: dict[str, list[str]] = {}
+    for prefix, _ in prefixes_and_files:
+        if _category_from_prefix(prefix) != "viral":
+            continue
+        group = viral_taxonomy.get(prefix, "unknown")
+        groups.setdefault(group, []).append(prefix)
+    if not groups:
+        return read_limits
+    # Target per group = min over groups of (sum of max_reads in group)
+    total_per_group = {}
+    for group, prefs in groups.items():
+        total_per_group[group] = sum(prefix_to_max_reads.get(p, 0) for p in prefs)
+    target_total = min(total_per_group.values()) if total_per_group else 0
+    if target_total <= 0:
+        return read_limits
+    # Per-file limit in each group so group total = target_total
+    result = list(read_limits)
+    for i, (prefix, _fp) in enumerate(prefixes_and_files):
+        if _category_from_prefix(prefix) != "viral" or i >= len(result):
+            continue
+        group = viral_taxonomy.get(prefix, "unknown")
+        prefs = groups.get(group, [])
+        if not prefs:
+            continue
+        max_r = prefix_to_max_reads.get(prefix, 0)
+        per_file = max(1, target_total // len(prefs))
+        result[i] = min(max_r, per_file) if max_r else result[i]
+    return result
+
+
 def _compute_read_limits(
     prefixes_and_files: list[tuple[str, Path]],
     base_reads_per_file: int,
@@ -363,6 +423,8 @@ def build_metagenome(
     extra_viral_fasta: Path | None = None,
     abundance_profile: dict[str, float] | None = None,
     abundance_distribution: str | None = None,
+    viral_taxonomy_json: Path | None = None,
+    balance_viral_by_taxonomy: bool = False,
 ) -> int | tuple[int, list[SeqRecord]]:
     """Build a metagenome FASTA from input_path. Fixed-length or variable-length (min_length–max_length) contigs.
 
@@ -376,6 +438,7 @@ def build_metagenome(
     with prefix extra_viral_0, extra_viral_1, ... using the same length and mutation settings.
     If abundance_profile is set (e.g. {"bacterial": 0.5, "viral": 2.0}), scale reads per file by category.
     If abundance_distribution == "exponential", assign per-genome weights from Exp(1) (use seed for reproducibility).
+    If viral_taxonomy_json and balance_viral_by_taxonomy, viral read limits are set so each taxonomy group (e.g. family) contributes equally.
     """
     from .similarity_filter import filter_by_similarity, filter_candidates_against_kept
 
@@ -416,6 +479,26 @@ def build_metagenome(
             abundance_distribution=abundance_distribution,
             seed=seed,
         )
+
+    if viral_taxonomy_json and viral_taxonomy_json.is_file() and balance_viral_by_taxonomy:
+        from .viral_taxonomy import load_viral_taxonomy
+        viral_tax = load_viral_taxonomy(viral_taxonomy_json)
+        if viral_tax:
+            # Reuse single get_file_stats result for balance (avoids re-scanning all FASTAs)
+            stats = get_file_stats(
+                input_path,
+                sequence_length,
+                min_length=min_length,
+                max_length=max_length,
+            )
+            prefix_to_max_reads = {p: max_r for p, _fp, _tb, max_r in stats} if stats else {}
+            read_limits = _apply_viral_taxonomy_balance(
+                prefixes_and_files,
+                read_limits,
+                viral_tax,
+                prefix_to_max_reads=prefix_to_max_reads,
+            )
+            logger.info("Viral taxonomy balance: applied for %d viral prefixes", len(viral_tax))
 
     all_chunks: list[SeqRecord] = []
     for i, (prefix, fp) in enumerate(prefixes_and_files):
