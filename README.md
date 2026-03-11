@@ -43,7 +43,7 @@ Metagenome Generator downloads bacterial, viral, archaeal, and plasmid genomes f
 
 | Use case | What you want | Command or flow |
 |----------|----------------|------------------|
-| **Single metagenome** | One FASTA for training or benchmarking | `pipeline --num-organisms N --output-dir out --output metagenome.fasta --sequence-length 250 --reads-per-organism 1000` |
+| **Single metagenome** | One FASTA for training or benchmarking | `pipeline --num-bacteria N --num-virus N --output-dir out --output metagenome.fasta --sequence-length 250 --reads-per-organism 1000` |
 | **Reproducible run** | Same genomes every time | `snapshot` → save JSON; then `download --accessions-file <json>` (and chunk) or use that file in `pipeline` |
 | **Temporal train/test** | Train on “old” genomes, test on “new” (e.g. for generalization) | `temporal-split-info` → `temporal-split` → build train and test metagenomes → **`filter-test-against-train`** (important: removes test reads similar to train) |
 | **Single metagenome + train/test** | One dataset split 80/20 with similarity filter | `chunk` or `pipeline` with `--train-test-split 80` (similarity filter applied automatically) |
@@ -98,7 +98,8 @@ export ENTREZ_API_KEY="your_ncbi_api_key"   # optional, for higher rate limits
 
 ```bash
 metagenome-generator pipeline \
-  --num-organisms 10 \
+  --num-bacteria 10 \
+  --num-virus 10 \
   --output-dir output \
   --output metagenome.fasta \
   --sequence-length 250 \
@@ -110,7 +111,7 @@ Result: genomes in `output/downloaded/`, metagenome FASTA in `output/metagenome/
 **Do it in two steps (download, then chunk):**
 
 ```bash
-metagenome-generator download --num-organisms 10 --output-dir output
+metagenome-generator download --num-bacteria 10 --num-virus 10 --output-dir output
 metagenome-generator chunk \
   --input output/downloaded \
   --output metagenome.fasta \
@@ -131,19 +132,22 @@ Sections below describe each feature and how to use it.
 
 ### Download genomes
 
-Obtain RefSeq genomes by category (bacteria, virus, archaea, plasmid). Use `--accessions-file` with a snapshot JSON for reproducible runs.
+Obtain RefSeq genomes by category (bacteria, virus, archaea, plasmid) from NCBI Nucleotide. You specify **how many bacterial** and **how many viral** genomes separately; optionally add archaea and plasmid as extra negative samples. Output is written to category subfolders: `bacteria/`, `virus/`, `archaea/`, `plasmid/` under the output directory.
 
 ```bash
-metagenome-generator download --num-organisms 10 --output-dir output
+metagenome-generator download --num-bacteria 10 --num-virus 10 --output-dir output
 ```
 
 | Option | Use |
 |--------|-----|
-| `--num-organisms` | Number of bacterial and viral genomes. |
-| `--num-archaea`, `--num-plasmid` | Extra archaeal/plasmid genomes. |
-| `--accessions-file` | Load accession IDs from JSON (no NCBI search); use with snapshot for reproducibility. |
-| `--save-accessions` | Save the chosen accession list to JSON for later `--accessions-file` runs. |
-| `--complete-only` | Restrict to complete genomes (exclude WGS/draft) when searching; for reproducibility, create a snapshot with `snapshot --complete-only` and use that as `--accessions-file`. |
+| `--num-bacteria` | **Number of bacterial genomes.** How many RefSeq bacterial genomes to fetch. Use for negative (non-viral) samples in viral vs. prokaryotic classifiers. Set to 0 only when using `--accessions-file` with a snapshot that has no bacterial list. |
+| `--num-virus` | **Number of viral genomes.** How many RefSeq viral genomes to fetch. Use for positive (viral) samples. Set to 0 only when using `--accessions-file` with a snapshot that has no viral list. |
+| `--num-archaea` | **Number of archaeal genomes.** Optional; default 0. Archaea are additional negative samples (non-viral). Use to broaden the diversity of non-viral sequences (e.g. for phage vs. bacteria + archaea). |
+| `--num-plasmid` | **Number of plasmid sequences.** Optional; default 0. Plasmids are additional negative samples. Use when you want to avoid classifying plasmid-derived reads as viral. |
+| `--output-dir` | **Output directory.** All category folders (`bacteria/`, `virus/`, etc.) are created under this path. Use a dedicated directory (e.g. `working_directory/downloaded/`) to keep runs organized. |
+| `--accessions-file` | **Reproducible run.** Path to a JSON file containing accession IDs (e.g. from `snapshot` or a previous `--save-accessions` run). NCBI search is skipped; exactly these accessions are downloaded. Use when you need the same genome set on every run (e.g. for benchmarks or paper reproducibility). |
+| `--save-accessions` | **Save chosen accessions.** After searching NCBI, write the selected accession lists and a UTC timestamp to this JSON path. Use this file later as `--accessions-file` to re-download the same set. Ignored when `--accessions-file` is set. |
+| `--complete-only` | **Complete genomes only.** When searching NCBI (no `--accessions-file`), restrict results to complete genomes and exclude WGS/draft (uses NCBI `complete[Properties]` and `NOT WGS[Properties]`). For reproducible complete-only runs, create a snapshot with `snapshot --complete-only` and use that JSON as `--accessions-file`. Ignored when using `--accessions-file`. |
 
 ---
 
@@ -186,7 +190,8 @@ One command to download and chunk; optionally run BLASTN (EVE) and Seeker. Layou
 
 ```bash
 metagenome-generator pipeline \
-  --num-organisms 10 \
+  --num-bacteria 10 \
+  --num-virus 10 \
   --output-dir output \
   --output metagenome.fasta \
   --sequence-length 250 \

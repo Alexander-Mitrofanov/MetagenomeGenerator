@@ -204,7 +204,8 @@ def _download_category_batched(
 
 
 def download_genomes(
-    num_organisms: int,
+    num_bacteria: int,
+    num_virus: int,
     output_dir: Path,
     *,
     num_archaea: int = 0,
@@ -215,8 +216,9 @@ def download_genomes(
 ) -> None:
     """Download bacterial and viral genomes (and optionally archaea, plasmid) into `output_dir`.
 
-    Uses category subfolders: bacteria/, virus/, archaea/, plasmid/. Negative samples
-    (bacteria, archaea, plasmid) support training classifiers to distinguish viruses.
+    Uses category subfolders: bacteria/, virus/, archaea/, plasmid/. You specify how many
+    bacterial and how many viral genomes separately (num_bacteria, num_virus). Negative
+    samples (bacteria, archaea, plasmid) support training classifiers to distinguish viruses.
 
     If accessions_file is set, load accession IDs from that JSON (and optional timestamp)
     instead of searching NCBI, so the run is reproducible. If save_accessions_to is set,
@@ -243,11 +245,11 @@ def download_genomes(
         if complete_only:
             print("Complete-only: restricting to complete genomes (excluding WGS/draft).")
         print("Searching for bacterial genomes...")
-        bacterial_ids = search_genomes(queries["bacterial"], num_organisms)
+        bacterial_ids = search_genomes(queries["bacterial"], num_bacteria)
         print(f"  Found {len(bacterial_ids)} IDs")
 
         print("Searching for viral genomes...")
-        viral_ids = search_genomes(queries["viral"], num_organisms)
+        viral_ids = search_genomes(queries["viral"], num_virus)
         print(f"  Found {len(viral_ids)} IDs")
 
         archaea_ids = []
@@ -294,10 +296,16 @@ def _cli(argv: list[str] | None = None) -> None:
         description="Download bacterial and viral genomes (and optionally archaea, plasmid) from NCBI."
     )
     parser.add_argument(
-        "--num-organisms",
+        "--num-bacteria",
         type=int,
         default=10,
-        help="Number of bacterial and viral genomes each. Default: 10",
+        help="Number of bacterial genomes to download. Default: 10",
+    )
+    parser.add_argument(
+        "--num-virus",
+        type=int,
+        default=10,
+        help="Number of viral genomes to download. Default: 10",
     )
     parser.add_argument(
         "--num-archaea",
@@ -337,7 +345,8 @@ def _cli(argv: list[str] | None = None) -> None:
         parser.error(f"--accessions-file not found: {args.accessions_file}")
 
     download_genomes(
-        args.num_organisms,
+        args.num_bacteria,
+        args.num_virus,
         args.output_dir,
         num_archaea=args.num_archaea,
         num_plasmid=args.num_plasmid,

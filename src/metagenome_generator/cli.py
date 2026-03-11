@@ -46,10 +46,16 @@ def _add_download_subparser(subparsers) -> None:
         help="Download bacterial and viral genomes from NCBI",
     )
     p.add_argument(
-        "--num-organisms",
+        "--num-bacteria",
         type=int,
         default=10,
-        help="Number of organisms to download per group (bacterial and viral). Default: 10",
+        help="Number of bacterial genomes to download. Default: 10",
+    )
+    p.add_argument(
+        "--num-virus",
+        type=int,
+        default=10,
+        help="Number of viral genomes to download. Default: 10",
     )
     p.add_argument(
         "--output-dir",
@@ -278,10 +284,16 @@ def _add_pipeline_subparser(subparsers) -> None:
         help="Run download + chunk (+ optional BLASTN, Seeker). Uses organized layout: output_dir/downloaded, blastn, metagenome, seeker.",
     )
     p.add_argument(
-        "--num-organisms",
+        "--num-bacteria",
         type=int,
         default=10,
-        help="Number of organisms to download per group (bacterial and viral). Default: 10",
+        help="Number of bacterial genomes to download. Default: 10",
+    )
+    p.add_argument(
+        "--num-virus",
+        type=int,
+        default=10,
+        help="Number of viral genomes to download. Default: 10",
     )
     p.add_argument(
         "--output-dir",
@@ -824,7 +836,8 @@ def _run_temporal_split_info(args) -> None:
 
 def _run_download(args) -> None:
     download_genomes(
-        args.num_organisms,
+        args.num_bacteria,
+        args.num_virus,
         args.output_dir,
         num_archaea=getattr(args, "num_archaea", 0),
         num_plasmid=getattr(args, "num_plasmid", 0),
@@ -974,10 +987,11 @@ def _run_pipeline(args) -> None:
         download_dir = base / OUTPUT_DIR_DOWNLOADED
         download_dir.mkdir(parents=True, exist_ok=True)
         metagenome_dir.mkdir(parents=True, exist_ok=True)
-        plog.info("Step 1: Download genomes (num_organisms=%s, num_archaea=%s, num_plasmid=%s)",
-                  args.num_organisms, getattr(args, "num_archaea", 0), getattr(args, "num_plasmid", 0))
+        plog.info("Step 1: Download genomes (num_bacteria=%s, num_virus=%s, num_archaea=%s, num_plasmid=%s)",
+                  args.num_bacteria, args.num_virus, getattr(args, "num_archaea", 0), getattr(args, "num_plasmid", 0))
         download_genomes(
-            args.num_organisms,
+            args.num_bacteria,
+            args.num_virus,
             download_dir,
             num_archaea=getattr(args, "num_archaea", 0),
             num_plasmid=getattr(args, "num_plasmid", 0),
