@@ -835,6 +835,13 @@ def _run_temporal_split_info(args) -> None:
 
 
 def _run_download(args) -> None:
+    accessions_file = getattr(args, "accessions_file", None)
+    if accessions_file is not None and not accessions_file.exists():
+        raise SystemExit(f"--accessions-file not found: {accessions_file}")
+    if args.num_bacteria < 0:
+        raise SystemExit("--num-bacteria must be >= 0")
+    if args.num_virus < 0:
+        raise SystemExit("--num-virus must be >= 0")
     download_genomes(
         args.num_bacteria,
         args.num_virus,
@@ -859,6 +866,15 @@ def _run_snapshot(args) -> None:
 
 
 def _run_chunk(args) -> None:
+    if not args.input.exists():
+        raise SystemExit(f"--input path does not exist: {args.input}")
+    seq_len = getattr(args, "sequence_length", 250)
+    if seq_len < 1:
+        raise SystemExit("--sequence-length must be >= 1")
+    min_len = getattr(args, "min_contig_length", None)
+    max_len = getattr(args, "max_contig_length", None)
+    if min_len is not None and max_len is not None and min_len > max_len:
+        raise SystemExit("--min-contig-length must be <= --max-contig-length")
     if args.input.is_dir():
         ok, err = validate_genome_dir(args.input)
         if not ok:
@@ -984,6 +1000,13 @@ def _run_pipeline(args) -> None:
         plog.info("Step 1: Download — skipped (using existing genome dir: %s)", download_dir)
         print(f"Using existing genome data: {download_dir}")
     else:
+        if args.num_bacteria < 0:
+            raise SystemExit("--num-bacteria must be >= 0")
+        if args.num_virus < 0:
+            raise SystemExit("--num-virus must be >= 0")
+        accessions_file = getattr(args, "accessions_file", None)
+        if accessions_file is not None and not accessions_file.exists():
+            raise SystemExit(f"--accessions-file not found: {accessions_file}")
         download_dir = base / OUTPUT_DIR_DOWNLOADED
         download_dir.mkdir(parents=True, exist_ok=True)
         metagenome_dir.mkdir(parents=True, exist_ok=True)

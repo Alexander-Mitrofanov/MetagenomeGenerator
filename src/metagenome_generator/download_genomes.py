@@ -228,6 +228,10 @@ def download_genomes(
     For reproducible complete-only runs, create a snapshot with --complete-only then use
     that JSON as --accessions-file.
     """
+    if num_bacteria < 0:
+        raise ValueError("num_bacteria must be >= 0")
+    if num_virus < 0:
+        raise ValueError("num_virus must be >= 0")
     output_dir.mkdir(parents=True, exist_ok=True)
     bacteria_dir = output_dir / BACTERIA_DIR
     virus_dir = output_dir / VIRUS_DIR
