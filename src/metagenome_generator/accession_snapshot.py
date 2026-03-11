@@ -28,7 +28,7 @@ from .download_genomes import (
     ACCESSIONS_KEY_TIMESTAMP,
     ACCESSIONS_KEY_VIRAL,
 )
-from .ncbi_search import DEFAULT_QUERIES, search_genomes_all
+from .ncbi_search import get_queries, search_genomes_all
 from .temporal_split import fetch_accession_metadata
 
 logger = logging.getLogger(__name__)
@@ -75,15 +75,16 @@ def run_snapshot(
     fetch_metadata: bool = True,
     metadata_batch_size: int = 500,
     log_path: Path | None = None,
+    complete_only: bool = False,
 ) -> None:
     """Query NCBI for all matching accession IDs (no downloads), write JSON to snapshots.
 
     Fetches every bacterial, viral, archaeal, and plasmid genome matching
-    DEFAULT_QUERIES (RefSeq, complete genome, length filters). Output is compatible
-    with download_genomes --accessions-file. By default, CreateDate and Title are
-    stored per category (each accession has create_date and title in its category).
-    Use fetch_metadata=False (or --no-metadata) to write ID lists only (no dates/titles).
-    If log_path is set, all progress is also written to that file (default: snapshot_YYYY-MM-DD.log next to output).
+    the RefSeq queries (complete genome, length filters). If complete_only is True,
+    uses stricter NCBI filters (complete[Properties], NOT WGS[Properties]). Output
+    is compatible with download_genomes --accessions-file. By default, CreateDate
+    and Title are stored per category. Use fetch_metadata=False for ID lists only.
+    If log_path is set, progress is written to that file (default: snapshot_YYYY-MM-DD.log).
     """
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -96,6 +97,7 @@ def run_snapshot(
             output_path,
             fetch_metadata=fetch_metadata,
             metadata_batch_size=metadata_batch_size,
+            complete_only=complete_only,
         )
     finally:
         sys.stdout = tee._stdout
@@ -124,13 +126,17 @@ def _run_snapshot_impl(
     *,
     fetch_metadata: bool = True,
     metadata_batch_size: int = 500,
+    complete_only: bool = False,
 ) -> None:
     """Implementation of run_snapshot (stdout may be redirected to Tee)."""
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    queries = get_queries(complete_only=complete_only)
 
     print("Querying NCBI nucleotide for all matching accessions (no sequences downloaded)...")
+    if complete_only:
+        print("  (complete-only: excluding WGS/draft; requiring complete[Properties])")
     search_start = time.time()
 
     def _search_progress(category: str):
@@ -140,25 +146,25 @@ def _run_snapshot_impl(
 
     print("  Bacterial (all RefSeq complete genomes in range)...")
     bacterial = search_genomes_all(
-        DEFAULT_QUERIES["bacterial"],
+        queries["bacterial"],
         progress_callback=_search_progress("Bacterial"),
     )
     print(f"    Found {len(bacterial):,} IDs")
     print("  Viral (all RefSeq complete genomes in range)...")
     viral = search_genomes_all(
-        DEFAULT_QUERIES["viral"],
+        queries["viral"],
         progress_callback=_search_progress("Viral"),
     )
     print(f"    Found {len(viral):,} IDs")
     print("  Archaea (all RefSeq complete genomes in range)...")
     archaea = search_genomes_all(
-        DEFAULT_QUERIES["archaea"],
+        queries["archaea"],
         progress_callback=_search_progress("Archaea"),
     )
     print(f"    Found {len(archaea):,} IDs")
     print("  Plasmid (all RefSeq in range)...")
     plasmid = search_genomes_all(
-        DEFAULT_QUERIES["plasmid"],
+        queries["plasmid"],
         progress_callback=_search_progress("Plasmid"),
     )
     print(f"    Found {len(plasmid):,} IDs")

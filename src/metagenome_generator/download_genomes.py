@@ -19,7 +19,7 @@ from pathlib import Path
 from Bio import Entrez, SeqIO
 
 from .genome_layout import BACTERIA_DIR, VIRUS_DIR, ARCHAEA_DIR, PLASMID_DIR
-from .ncbi_search import DEFAULT_QUERIES, search_genomes
+from .ncbi_search import get_queries, search_genomes
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +163,7 @@ def download_genomes(
     num_plasmid: int = 0,
     accessions_file: Path | None = None,
     save_accessions_to: Path | None = None,
+    complete_only: bool = False,
 ) -> None:
     """Download bacterial and viral genomes (and optionally archaea, plasmid) into `output_dir`.
 
@@ -172,6 +173,10 @@ def download_genomes(
     If accessions_file is set, load accession IDs from that JSON (and optional timestamp)
     instead of searching NCBI, so the run is reproducible. If save_accessions_to is set,
     write the accession list and current UTC timestamp to that file after searching.
+    When not using accessions_file, complete_only=True restricts NCBI search to complete
+    genomes only (excludes WGS/draft via complete[Properties] and NOT WGS[Properties]).
+    For reproducible complete-only runs, create a snapshot with --complete-only then use
+    that JSON as --accessions-file.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     bacteria_dir = output_dir / BACTERIA_DIR
@@ -186,24 +191,27 @@ def download_genomes(
         print(f"Using accessions from {accessions_file} (timestamp: {ts})")
         print(f"  Bacterial: {len(bacterial_ids)}, viral: {len(viral_ids)}, archaea: {len(archaea_ids)}, plasmid: {len(plasmid_ids)}")
     else:
+        queries = get_queries(complete_only=complete_only)
+        if complete_only:
+            print("Complete-only: restricting to complete genomes (excluding WGS/draft).")
         print("Searching for bacterial genomes...")
-        bacterial_ids = search_genomes(DEFAULT_QUERIES["bacterial"], num_organisms)
+        bacterial_ids = search_genomes(queries["bacterial"], num_organisms)
         print(f"  Found {len(bacterial_ids)} IDs")
 
         print("Searching for viral genomes...")
-        viral_ids = search_genomes(DEFAULT_QUERIES["viral"], num_organisms)
+        viral_ids = search_genomes(queries["viral"], num_organisms)
         print(f"  Found {len(viral_ids)} IDs")
 
         archaea_ids = []
         if num_archaea > 0:
             print("Searching for archaeal genomes...")
-            archaea_ids = search_genomes(DEFAULT_QUERIES["archaea"], num_archaea)
+            archaea_ids = search_genomes(queries["archaea"], num_archaea)
             print(f"  Found {len(archaea_ids)} IDs")
 
         plasmid_ids = []
         if num_plasmid > 0:
             print("Searching for plasmids...")
-            plasmid_ids = search_genomes(DEFAULT_QUERIES["plasmid"], num_plasmid)
+            plasmid_ids = search_genomes(queries["plasmid"], num_plasmid)
             print(f"  Found {len(plasmid_ids)} IDs")
 
         if save_accessions_to is not None:

@@ -68,6 +68,11 @@ def _add_download_subparser(subparsers) -> None:
         metavar="PATH",
         help="After searching NCBI, save accession list and UTC timestamp to JSON for later --accessions-file runs.",
     )
+    p.add_argument(
+        "--complete-only",
+        action="store_true",
+        help="When searching NCBI (no --accessions-file), restrict to complete genomes only (exclude WGS/draft). For reproducible runs use a snapshot created with snapshot --complete-only.",
+    )
     p.set_defaults(func=_run_download)
 
 
@@ -99,6 +104,11 @@ def _add_snapshot_subparser(subparsers) -> None:
         default=None,
         metavar="PATH",
         help="Write progress log to this file. Default: snapshot_YYYY-MM-DD.log next to the output JSON.",
+    )
+    p.add_argument(
+        "--complete-only",
+        action="store_true",
+        help="Restrict to complete genomes only (NCBI: complete[Properties], NOT WGS[Properties]). Use this snapshot with --accessions-file for reproducible complete-only runs.",
     )
     p.set_defaults(func=_run_snapshot)
 
@@ -421,6 +431,11 @@ def _add_pipeline_subparser(subparsers) -> None:
         help="After NCBI search, save accession list and UTC timestamp to JSON for later --accessions-file runs.",
     )
     p.add_argument(
+        "--complete-only",
+        action="store_true",
+        help="When downloading (no --accessions-file), restrict to complete genomes only (exclude WGS/draft). Use snapshot --complete-only for reproducible complete-only runs.",
+    )
+    p.add_argument(
         "--forbid-ambiguous",
         action="store_true",
         help="Discard chunks containing ambiguous bases (non-ACGT, e.g. N). By default, such chunks are kept.",
@@ -632,6 +647,7 @@ def _run_download(args) -> None:
         num_plasmid=getattr(args, "num_plasmid", 0),
         accessions_file=getattr(args, "accessions_file", None),
         save_accessions_to=getattr(args, "save_accessions", None),
+        complete_only=getattr(args, "complete_only", False),
     )
 
 
@@ -642,6 +658,7 @@ def _run_snapshot(args) -> None:
         fetch_metadata=not getattr(args, "no_metadata", False),
         metadata_batch_size=getattr(args, "metadata_batch_size", 500),
         log_path=getattr(args, "log", None),
+        complete_only=getattr(args, "complete_only", False),
     )
 
 
@@ -773,6 +790,7 @@ def _run_pipeline(args) -> None:
             num_plasmid=getattr(args, "num_plasmid", 0),
             accessions_file=getattr(args, "accessions_file", None),
             save_accessions_to=getattr(args, "save_accessions", None),
+            complete_only=getattr(args, "complete_only", False),
         )
 
     metagenome_dir.mkdir(parents=True, exist_ok=True)

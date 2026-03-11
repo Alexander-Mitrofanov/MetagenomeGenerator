@@ -35,6 +35,16 @@ DEFAULT_QUERIES = {
     ),
 }
 
+# Stricter completeness: exclude WGS/draft; require complete [Properties] (NCBI nucleotide)
+COMPLETE_ONLY_SUFFIX = " AND complete[Properties] AND NOT WGS[Properties]"
+
+
+def get_queries(*, complete_only: bool = False) -> dict[str, str]:
+    """Return category -> query dict. If complete_only, append NCBI completeness filters."""
+    if not complete_only:
+        return dict(DEFAULT_QUERIES)
+    return {k: (q + COMPLETE_ONLY_SUFFIX) for k, q in DEFAULT_QUERIES.items()}
+
 
 # NCBI limits esearch to 10,000 UIDs per request; we page with this batch size.
 ESEARCH_BATCH_SIZE = 10_000

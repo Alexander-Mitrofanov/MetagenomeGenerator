@@ -32,6 +32,7 @@ Metagenome Generator produces FASTA training data for viral vs. prokaryotic (or 
 | **Similarity filtering** | Drop reads ≥90% similar to already-kept; optional train/test split with test sequences removed if similar to train. |
 | **Mutation simulation** | Per-base substitution and optional indel rates; test classifier robustness to sequencing error or divergence (e.g. 1% substitutions). |
 | **Extra viral FASTA** | Merge user-provided viral sequences (e.g. metavirome contigs) with RefSeq viral chunks in one run. |
+| **Genome quality / completeness** | Restrict to complete genomes only (exclude WGS/draft) via `--complete-only` in snapshot and download; uses NCBI `complete[Properties]` and `NOT WGS[Properties]`. |
 | **Ambiguous-base filter** | Exclude reads containing non-ACGT characters (e.g. N). |
 | **Seeker integration** | Run Seeker (phage/bacteria prediction) on the generated metagenome from the same workflow. |
 
@@ -146,6 +147,7 @@ metagenome-generator download \
 | `--num-archaea`, `--num-plasmid` | Include archaeal/plasmid genomes as additional negatives. |
 | `--accessions-file` | Load accession IDs from JSON (skip NCBI search); use with snapshot for reproducibility. |
 | `--save-accessions` | After searching, save accession list and timestamp to JSON for later `--accessions-file` runs. |
+| `--complete-only` | When searching NCBI (no `--accessions-file`), restrict to complete genomes only (exclude WGS/draft). For reproducible complete-only runs, create a snapshot with `snapshot --complete-only` then use that JSON as `--accessions-file`. |
 
 ---
 
@@ -193,7 +195,7 @@ metagenome-generator pipeline \
   --reads-per-organism 1000
 ```
 
-Pipeline options include all chunk options plus: `--run-blastn-filter`, `--run-seeker`, `--accessions-file`, `--forbid-ambiguous`, `--substitution-rate`, `--indel-rate`, `--extra-viral-fasta`. See `metagenome-generator pipeline --help`.
+Pipeline options include all chunk options plus: `--run-blastn-filter`, `--run-seeker`, `--accessions-file`, `--complete-only`, `--forbid-ambiguous`, `--substitution-rate`, `--indel-rate`, `--extra-viral-fasta`. See `metagenome-generator pipeline --help`.
 
 ---
 
@@ -205,7 +207,7 @@ Pipeline options include all chunk options plus: `--run-blastn-filter`, `--run-s
 metagenome-generator snapshot
 ```
 
-With metadata (default), each category stores `{accession, create_date, title}` per entry for temporal split and auditing. Use `--no-metadata` for lists only. Convert legacy snapshots with `metagenome-generator migrate-snapshot <path>`.
+With metadata (default), each category stores `{accession, create_date, title}` per entry for temporal split and auditing. Use `--no-metadata` for lists only. Use `--complete-only` to restrict the catalog to complete genomes only (exclude WGS/draft); then use that snapshot with `--accessions-file` for reproducible complete-only downloads. Convert legacy snapshots with `metagenome-generator migrate-snapshot <path>`.
 
 ---
 
