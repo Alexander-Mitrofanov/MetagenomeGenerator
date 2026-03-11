@@ -14,11 +14,60 @@ import random
 from pathlib import Path
 
 from Bio import SeqIO
+from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 
 from .genome_layout import iter_genome_fastas
 
 logger = logging.getLogger(__name__)
+
+BASES = "ACGT"
+
+
+def _apply_mutations(
+    seq_str: str,
+    substitution_rate: float,
+    indel_rate: float,
+    rng: random.Random,
+) -> str:
+    """Apply substitutions and optionally indels to a sequence (ACGT only).
+
+    substitution_rate: per-base probability of substituting to a random different base.
+    indel_rate: per-base probability of an indel (50% insert random base, 50% delete).
+    With indels, output length can change. Uses rng for reproducibility.
+    """
+    if substitution_rate <= 0 and indel_rate <= 0:
+        return seq_str
+    seq_str = seq_str.upper()
+    out: list[str] = []
+    for c in seq_str:
+        if c not in BASES:
+            out.append(c)
+            continue
+        # Indel (before the base)
+        if indel_rate > 0 and rng.random() < indel_rate:
+            if rng.random() < 0.5:
+                out.append(rng.choice(BASES))
+            else:
+                continue  # delete this base
+        # Substitution
+        if substitution_rate > 0 and rng.random() < substitution_rate:
+            others = [b for b in BASES if b != c]
+            out.append(rng.choice(others) if others else c)
+        else:
+            out.append(c)
+    return "".join(out)
+
+
+def _apply_mutations_to_record(
+    rec: SeqRecord,
+    substitution_rate: float,
+    indel_rate: float,
+    rng: random.Random,
+) -> SeqRecord:
+    """Return a new SeqRecord with mutations applied to the sequence. Preserves id and description."""
+    new_seq = _apply_mutations(str(rec.seq), substitution_rate, indel_rate, rng)
+    return SeqRecord(Seq(new_seq), id=rec.id, description=rec.description)
 
 
 def chunk_sequence(record, prefix: str, chunk_size: int, yield_coords: bool = False):
@@ -134,16 +183,21 @@ def _collect_chunks_for_file(
     seed: int | None = None,
     eve_intervals: dict[tuple[str, str], list[tuple[int, int]]] | None = None,
     allow_ambiguous: bool = True,
+    substitution_rate: float = 0.0,
+    indel_rate: float = 0.0,
+    mutation_rng: random.Random | None = None,
 ) -> list[SeqRecord]:
     """Collect chunks for a single FASTA file (fixed- or variable-length).
 
     Skips chunks overlapping EVE if eve_intervals is given.
+    If substitution_rate or indel_rate > 0, applies mutations to each chunk (use mutation_rng for reproducibility).
     """
     from .blastn_filter import chunk_overlaps_eve
 
     chunks: list[SeqRecord] = []
     rng = random.Random(seed) if seed is not None else None
     use_eve = eve_intervals is not None
+    apply_mutations = (substitution_rate > 0 or indel_rate > 0) and mutation_rng is not None
 
     for record in SeqIO.parse(fp, "fasta"):
         key = (prefix, record.id)
@@ -161,6 +215,8 @@ def _collect_chunks_for_file(
                     rec = item
                 if not _is_allowed_sequence(rec, allow_ambiguous):
                     continue
+                if apply_mutations:
+                    rec = _apply_mutations_to_record(rec, substitution_rate, indel_rate, mutation_rng)
                 chunks.append(rec)
         else:
             for i, item in enumerate(chunk_sequence(record, prefix, sequence_length, yield_coords=use_eve)):
@@ -174,8 +230,58 @@ def _collect_chunks_for_file(
                     rec = item
                 if not _is_allowed_sequence(rec, allow_ambiguous):
                     continue
+                if apply_mutations:
+                    rec = _apply_mutations_to_record(rec, substitution_rate, indel_rate, mutation_rng)
                 chunks.append(rec)
         break
+    return chunks
+
+
+def _collect_chunks_from_multirecord_fasta(
+    fp: Path,
+    sequence_length: int,
+    reads_per_organism: int | None,
+    prefix_base: str,
+    *,
+    min_length: int | None = None,
+    max_length: int | None = None,
+    seed: int | None = None,
+    allow_ambiguous: bool = True,
+    substitution_rate: float = 0.0,
+    indel_rate: float = 0.0,
+) -> list[SeqRecord]:
+    """Collect chunks from a multi-record FASTA (e.g. metavirome contigs). No EVE filtering.
+
+    Each record is chunked with prefix prefix_base_0, prefix_base_1, ... Same length/balance
+    and mutation logic as main input; use seed for reproducibility.
+    """
+    chunks: list[SeqRecord] = []
+    use_mutations = substitution_rate > 0 or indel_rate > 0
+    for rec_idx, record in enumerate(SeqIO.parse(fp, "fasta")):
+        prefix = f"{prefix_base}_{rec_idx}"
+        file_seed = (seed + 20000 + rec_idx) if seed is not None else None
+        rng = random.Random(file_seed) if file_seed is not None else None
+        file_mutation_rng = random.Random(seed + 30000 + rec_idx) if use_mutations else None
+        apply_mutations = use_mutations and file_mutation_rng is not None
+        if min_length is not None and max_length is not None:
+            for item in chunk_sequence_variable(
+                record, prefix, min_length, max_length, reads_per_organism, rng=rng, yield_coords=False
+            ):
+                rec = item
+                if not _is_allowed_sequence(rec, allow_ambiguous):
+                    continue
+                if apply_mutations:
+                    rec = _apply_mutations_to_record(rec, substitution_rate, indel_rate, file_mutation_rng)
+                chunks.append(rec)
+        else:
+            for i, rec in enumerate(chunk_sequence(record, prefix, sequence_length, yield_coords=False)):
+                if reads_per_organism is not None and i >= reads_per_organism:
+                    break
+                if not _is_allowed_sequence(rec, allow_ambiguous):
+                    continue
+                if apply_mutations:
+                    rec = _apply_mutations_to_record(rec, substitution_rate, indel_rate, file_mutation_rng)
+                chunks.append(rec)
     return chunks
 
 
@@ -191,6 +297,8 @@ def build_metagenome(
     cap_total_reads: int | None = None,
     eve_intervals: dict[tuple[str, str], list[tuple[int, int]]] | None = None,
     allow_ambiguous: bool = True,
+    substitution_rate: float = 0.0,
+    indel_rate: float = 0.0,
     filter_similar: bool = False,
     similarity_threshold: float = 90.0,
     similarity_min_coverage: float = 0.8,
@@ -198,16 +306,27 @@ def build_metagenome(
     similarity_work_dir: Path | None = None,
     max_refill_rounds: int = 3,
     return_records: bool = False,
+    extra_viral_fasta: Path | None = None,
 ) -> int | tuple[int, list[SeqRecord]]:
     """Build a metagenome FASTA from input_path. Fixed-length or variable-length (min_length–max_length) contigs.
 
     If cap_total_reads is set, randomly downsample to that many reads (for balancing negative to positive).
     If eve_intervals is set, chunks overlapping those intervals (EVE regions) are excluded.
+    If substitution_rate or indel_rate > 0, applies mutations to each chunk (seed used for reproducibility; default 42).
     If filter_similar is True: generate more chunks than needed (oversample), filter out sequences that are
     >= similarity_threshold (default 90%%) similar to any already-kept sequence, then refill until target or max rounds.
     If return_records is True, do not write to out_path and return (count, list[SeqRecord]) for train-test split.
+    If extra_viral_fasta is set, chunks from that FASTA (multi-record, e.g. metavirome contigs) are merged in
+    with prefix extra_viral_0, extra_viral_1, ... using the same length and mutation settings.
     """
     from .similarity_filter import filter_by_similarity, filter_candidates_against_kept
+
+    use_mutations = substitution_rate > 0 or indel_rate > 0
+    if extra_viral_fasta is not None and not extra_viral_fasta.is_file():
+        raise FileNotFoundError(f"extra_viral_fasta not found or not a file: {extra_viral_fasta}")
+    if use_mutations and seed is None:
+        seed = 42
+    mutation_rng = random.Random(seed) if use_mutations else None
 
     if input_path.is_file():
         prefixes_and_files = [(input_path.stem, input_path)]
@@ -233,6 +352,7 @@ def build_metagenome(
     all_chunks: list[SeqRecord] = []
     for i, (prefix, fp) in enumerate(prefixes_and_files):
         file_seed = (seed + i) if seed is not None else None
+        file_mutation_rng = random.Random(seed + 10000 + i) if mutation_rng is not None else None
         chunks = _collect_chunks_for_file(
             fp,
             sequence_length,
@@ -243,8 +363,28 @@ def build_metagenome(
             seed=file_seed,
             eve_intervals=eve_intervals,
             allow_ambiguous=allow_ambiguous,
+            substitution_rate=substitution_rate,
+            indel_rate=indel_rate,
+            mutation_rng=file_mutation_rng,
         )
         all_chunks.extend(chunks)
+
+    if extra_viral_fasta is not None:
+        extra_seed = seed if seed is not None else 42
+        extra_chunks = _collect_chunks_from_multirecord_fasta(
+            extra_viral_fasta,
+            sequence_length,
+            reads_per_organism_gen,
+            "extra_viral",
+            min_length=min_length,
+            max_length=max_length,
+            seed=extra_seed,
+            allow_ambiguous=allow_ambiguous,
+            substitution_rate=substitution_rate,
+            indel_rate=indel_rate,
+        )
+        all_chunks.extend(extra_chunks)
+        logger.info("Extra viral FASTA: added %d chunks from %s", len(extra_chunks), extra_viral_fasta)
 
     if filter_similar and target_count is not None and target_count > 0:
         work_dir = similarity_work_dir or (out_path.parent / ".simfilter_work")
@@ -273,6 +413,7 @@ def build_metagenome(
             more_chunks: list[SeqRecord] = []
             for i, (prefix, fp) in enumerate(prefixes_and_files):
                 file_seed = (refill_seed + i) if refill_seed is not None else None
+                file_mutation_rng = random.Random(refill_seed + 10000 + i) if mutation_rng is not None else None
                 chunks = _collect_chunks_for_file(
                     fp,
                     sequence_length,
@@ -283,6 +424,9 @@ def build_metagenome(
                     seed=file_seed,
                     eve_intervals=eve_intervals,
                     allow_ambiguous=allow_ambiguous,
+                    substitution_rate=substitution_rate,
+                    indel_rate=indel_rate,
+                    mutation_rng=file_mutation_rng,
                 )
                 more_chunks.extend(chunks)
             if not more_chunks:

@@ -197,6 +197,27 @@ def _add_chunk_subparser(subparsers) -> None:
         action="store_true",
         help="Discard chunks containing ambiguous bases (non-ACGT, e.g. N). By default, such chunks are kept.",
     )
+    p.add_argument(
+        "--substitution-rate",
+        type=float,
+        default=0.0,
+        metavar="R",
+        help="Per-base substitution rate (0–1). Apply random base changes for robustness benchmarks. Use --seed for reproducibility. Default: 0",
+    )
+    p.add_argument(
+        "--indel-rate",
+        type=float,
+        default=0.0,
+        metavar="R",
+        help="Per-base indel rate (0–1). 50%% insert, 50%% delete; may change chunk length. Use with --seed. Default: 0",
+    )
+    p.add_argument(
+        "--extra-viral-fasta",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Extra FASTA of viral sequences (e.g. metavirome contigs) to chunk and merge with RefSeq viral chunks. Multi-record OK.",
+    )
     p.set_defaults(func=_run_chunk)
 
 
@@ -389,6 +410,27 @@ def _add_pipeline_subparser(subparsers) -> None:
         "--forbid-ambiguous",
         action="store_true",
         help="Discard chunks containing ambiguous bases (non-ACGT, e.g. N). By default, such chunks are kept.",
+    )
+    p.add_argument(
+        "--substitution-rate",
+        type=float,
+        default=0.0,
+        metavar="R",
+        help="Per-base substitution rate (0–1) when chunking. Use --seed for reproducibility. Default: 0",
+    )
+    p.add_argument(
+        "--indel-rate",
+        type=float,
+        default=0.0,
+        metavar="R",
+        help="Per-base indel rate (0–1) when chunking; may change chunk length. Default: 0",
+    )
+    p.add_argument(
+        "--extra-viral-fasta",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Extra FASTA of viral sequences (e.g. metavirome contigs) to chunk and merge with RefSeq viral chunks.",
     )
     p.set_defaults(func=_run_pipeline)
 
@@ -613,6 +655,13 @@ def _run_chunk(args) -> None:
         print(f"EVE intervals loaded for {len(eve_intervals)} sequences.")
 
     allow_ambiguous = not getattr(args, "forbid_ambiguous", False)
+    sub_rate = getattr(args, "substitution_rate", 0.0)
+    indel_r = getattr(args, "indel_rate", 0.0)
+    if (sub_rate > 0 or indel_r > 0) and getattr(args, "seed", None) is None:
+        args.seed = 42
+    extra_viral = getattr(args, "extra_viral_fasta", None)
+    if extra_viral is not None and not extra_viral.exists():
+        raise SystemExit(f"--extra-viral-fasta not found: {extra_viral}")
     count = build_metagenome(
         args.input,
         out_path,
@@ -624,6 +673,9 @@ def _run_chunk(args) -> None:
         cap_total_reads=getattr(args, "cap_total_reads", None),
         eve_intervals=eve_intervals,
         allow_ambiguous=allow_ambiguous,
+        substitution_rate=sub_rate,
+        indel_rate=indel_r,
+        extra_viral_fasta=extra_viral,
     )
     print(f"Wrote {count} sequences to {out_path}")
 
@@ -740,6 +792,13 @@ def _run_pipeline(args) -> None:
         plog.info("Train-test split: %.1f%% train; similarity threshold for test removal = %.1f%%",
                   train_test_split, getattr(args, "train_test_similarity_threshold", 90.0))
     allow_ambiguous = not getattr(args, "forbid_ambiguous", False)
+    sub_rate = getattr(args, "substitution_rate", 0.0)
+    indel_r = getattr(args, "indel_rate", 0.0)
+    if (sub_rate > 0 or indel_r > 0) and getattr(args, "seed", None) is None:
+        args.seed = 42
+    extra_viral = getattr(args, "extra_viral_fasta", None)
+    if extra_viral is not None and not extra_viral.exists():
+        raise SystemExit(f"--extra-viral-fasta not found: {extra_viral}")
     result = build_metagenome(
         download_dir,
         out_path,
@@ -757,6 +816,9 @@ def _run_pipeline(args) -> None:
         similarity_work_dir=metagenome_dir / ".simfilter_work",
         return_records=do_train_test_split,
         allow_ambiguous=allow_ambiguous,
+        substitution_rate=sub_rate,
+        indel_rate=indel_r,
+        extra_viral_fasta=extra_viral,
     )
     if do_train_test_split:
         _count, records = result

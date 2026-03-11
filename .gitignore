@@ -32,7 +32,7 @@ working_directory/
 # Snapshot run logs (in snapshots/)
 snapshots/*.log
 
-# Local-only docs (not published to the repo)
+# Local-only docs (excluded from GitHub; do not push)
 docs/
 
 # Test and coverage
