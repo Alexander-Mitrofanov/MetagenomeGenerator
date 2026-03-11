@@ -162,21 +162,21 @@ metagenome-generator chunk \
 
 | Option | Use |
 |--------|-----|
-| `--sequence-length` | Fixed read length (nt). |
-| `--reads-per-organism` | Max reads per genome; omit for all. |
-| `--balanced` | Same number of reads per genome. |
-| `--cap-total-reads` | Cap total reads (e.g. to match positive set size). |
-| `--min-contig-length`, `--max-contig-length` | Variable-length contigs instead of fixed. |
-| `--seed` | Random seed for reproducibility. |
-| `--eve-intervals` | Path to `eve_intervals.json` from `blastn-filter`; exclude EVE-overlapping chunks. |
-| `--forbid-ambiguous` | Discard reads with non-ACGT (e.g. N). |
-| `--substitution-rate`, `--indel-rate` | Mutation simulation for robustness tests. |
-| `--extra-viral-fasta` | Merge user viral FASTA (e.g. metavirome) with RefSeq viral. |
-| `--abundance-profile` | Per-category weights, e.g. `bacterial=0.5,viral=2`. |
-| `--abundance-distribution` | `exponential` for per-genome exponential weights. |
-| `--viral-taxonomy`, `--balance-viral-by-taxonomy` | Balance viral reads by taxonomy group (see Viral taxonomy). |
-| `--filter-similar` | Drop reads ≥90% similar to already-kept. |
-| `--train-test-split` | Write train/test FASTAs and remove from test reads similar to train. |
+| `--sequence-length` | **Fixed read length (nt).** Each chunk is exactly this many nucleotides. Typical values: 250–500 for short-read style; match your classifier’s expected input (e.g. 250 for some viral classifiers). Required unless you use variable-length mode. |
+| `--reads-per-organism` | **Max reads per genome.** Upper limit on how many non-overlapping (or sampled) reads are taken from each genome file. Omit to use all possible reads from every genome (can produce very large outputs). Use a fixed value (e.g. 1000) for controlled dataset size and balance across genomes when combined with other options. |
+| `--balanced` | **Same number of reads per genome.** Each genome contributes the same count of reads (the minimum across all genomes). Use when you want to avoid one category (e.g. bacteria) dominating simply because genomes are longer; good for training classifiers with even representation per genome. |
+| `--cap-total-reads` | **Cap total reads.** Downsample the whole metagenome to at most N reads. Use to match a target size (e.g. cap to the size of your positive set) or to keep evaluation sets manageable. Applied after per-genome limits and balancing. |
+| `--min-contig-length`, `--max-contig-length` | **Variable-length contigs.** Instead of fixed-length reads, sample contigs with lengths uniformly between these two values (nt). Use for long-read or contig-level benchmarks (e.g. 300–2000 bp). Omit both to use fixed `--sequence-length`. |
+| `--seed` | **Random seed.** Fixes randomness for variable-length sampling, cap, mutation, and train/test split. Use the same seed to reproduce the exact same metagenome; change the seed to get a different sample. |
+| `--eve-intervals` | **EVE exclusion.** Path to `eve_intervals.json` produced by `blastn-filter`. Chunks that overlap these endogenous viral element (EVE) intervals on non-viral genomes are excluded from the metagenome. Use to avoid bacterial/archaeal regions that look viral and would confound viral vs. non-viral classifiers. |
+| `--forbid-ambiguous` | **Exclude ambiguous bases.** Discard any read that contains non-ACGT characters (e.g. N, R, Y). Use when your pipeline or classifier assumes strict ACGT-only sequence, or to simulate cleaner sequencing. |
+| `--substitution-rate`, `--indel-rate` | **Mutation simulation.** Introduce substitutions and/or indels at the given per-base rate (0–1). Use to test classifier robustness to sequencing error or divergence (e.g. 0.01 for 1% substitution rate). Combine with `--seed` for reproducible mutated datasets. |
+| `--extra-viral-fasta` | **Merge user viral sequences.** Path to a FASTA of additional viral sequences (e.g. metavirome contigs, custom viral set). They are chunked like RefSeq viral genomes and merged into the viral pool. Use to combine public RefSeq viral data with your own viral contigs in one metagenome. |
+| `--abundance-profile` | **Per-category read weights.** Comma-separated `category=weight`, e.g. `bacterial=0.5,viral=2,archaea=1,plasmid=1`. Scales how many reads are taken from each category relative to the base limit. Use to simulate uneven community composition (e.g. more viral, less bacterial) without changing genome lists. |
+| `--abundance-distribution` | **Per-genome abundance model.** Set to `exponential` to assign each genome a weight from an exponential distribution (then normalized). Produces a few “abundant” and many “rare” genomes, similar to real communities. Use `--seed` for reproducibility. |
+| `--viral-taxonomy`, `--balance-viral-by-taxonomy` | **Taxonomy-aware viral balancing.** `--viral-taxonomy` is the path to the JSON from the `viral-taxonomy` command (viral prefix → taxonomy group). With `--balance-viral-by-taxonomy`, viral read limits are set so each taxonomy group (e.g. family) contributes equally. Use to avoid a few viral families dominating and to better train on under-represented groups. |
+| `--filter-similar` | **Within-metagenome similarity filter.** Remove any read that is ≥90% similar (identity and coverage) to a read already kept. The tool oversamples and refills to try to reach the target count. Use to reduce near-duplicate sequences in a single metagenome. |
+| `--train-test-split` | **Train/test split with similarity filter.** Percentage of reads for training (e.g. 80). Outputs `*_train.fasta` and `*_test.fasta`. Any test read that is ≥ similarity threshold (default 90% identity over 80% length) to a train read is removed. Use for quick evaluation from one metagenome while avoiding inflated metrics from near-duplicate train/test pairs. |
 
 ---
 
