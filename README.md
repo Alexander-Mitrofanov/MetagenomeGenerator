@@ -26,6 +26,7 @@ Metagenome Generator downloads bacterial, viral, archaeal, and plasmid genomes f
 - **Reproducible runs** — snapshot accession lists to JSON and re-download or re-chunk the same set anytime.
 - **Rigorous train/test evaluation** — temporal split by NCBI submission date, or percentage split with BLAST-based similarity filtering so test reads similar to train are removed.
 - **EVE handling** — BLAST non-viral vs viral to exclude (and optionally export) endogenous viral element regions.
+- **Structured benchmark recipe** — fixed N genomes per category (e.g. 50 viral, 50 bacterial), optional replicates; one command, reproducible and comparable to published protocols.
 - **Extra options** — mutation simulation, user-provided viral FASTA, genome completeness filter, abundance models, taxonomy-aware viral balancing.
 
 ---
@@ -47,6 +48,7 @@ Metagenome Generator downloads bacterial, viral, archaeal, and plasmid genomes f
 | **Reproducible run** | Same genomes every time | `snapshot` → save JSON; then `download --accessions-file <json>` (and chunk) or use that file in `pipeline` |
 | **Temporal train/test** | Train on “old” genomes, test on “new” (e.g. for generalization) | `temporal-split-info` → `temporal-split` → build train and test metagenomes → **`filter-test-against-train`** (important: removes test reads similar to train) |
 | **Single metagenome + train/test** | One dataset split 80/20 with similarity filter | `chunk` or `pipeline` with `--train-test-split 80` (similarity filter applied automatically) |
+| **Structured benchmark** | Fixed N per category, multiple replicates (e.g. for method comparison) | `snapshot` → `benchmark-recipe --accessions-file <snap> --output-dir out --per-category 50 --replicates 5` |
 
 For all runs, use a dedicated output directory (e.g. `working_directory/`).
 
@@ -175,12 +177,32 @@ metagenome-generator chunk \
 | `--eve-intervals` | **EVE exclusion.** Path to `eve_intervals.json` produced by `blastn-filter`. Chunks that overlap these endogenous viral element (EVE) intervals on non-viral genomes are excluded from the metagenome. Use to avoid bacterial/archaeal regions that look viral and would confound viral vs. non-viral classifiers. |
 | `--forbid-ambiguous` | **Exclude ambiguous bases.** Discard any read that contains non-ACGT characters (e.g. N, R, Y). Use when your pipeline or classifier assumes strict ACGT-only sequence, or to simulate cleaner sequencing. |
 | `--substitution-rate`, `--indel-rate` | **Mutation simulation.** Introduce substitutions and/or indels at the given per-base rate (0–1). Use to test classifier robustness to sequencing error or divergence (e.g. 0.01 for 1% substitution rate). Combine with `--seed` for reproducible mutated datasets. |
+| `--error-model` | **Platform-specific sequencing errors.** Set to `illumina` to apply position-dependent substitution (low at 5′, higher toward 3′, mimicking Illumina quality drop). Use for realistic benchmarking when training or evaluating on short-read data. Use `--seed` for reproducibility. |
 | `--extra-viral-fasta` | **Merge user viral sequences.** Path to a FASTA of additional viral sequences (e.g. metavirome contigs, custom viral set). They are chunked like RefSeq viral genomes and merged into the viral pool. Use to combine public RefSeq viral data with your own viral contigs in one metagenome. |
 | `--abundance-profile` | **Per-category read weights.** Comma-separated `category=weight`, e.g. `bacterial=0.5,viral=2,archaea=1,plasmid=1`. Scales how many reads are taken from each category relative to the base limit. Use to simulate uneven community composition (e.g. more viral, less bacterial) without changing genome lists. |
 | `--abundance-distribution` | **Per-genome abundance model.** Set to `exponential` to assign each genome a weight from an exponential distribution (then normalized). Produces a few “abundant” and many “rare” genomes, similar to real communities. Use `--seed` for reproducibility. |
 | `--viral-taxonomy`, `--balance-viral-by-taxonomy` | **Taxonomy-aware viral balancing.** `--viral-taxonomy` is the path to the JSON from the `viral-taxonomy` command (viral prefix → taxonomy group). With `--balance-viral-by-taxonomy`, viral read limits are set so each taxonomy group (e.g. family) contributes equally. Use to avoid a few viral families dominating and to better train on under-represented groups. |
 | `--filter-similar` | **Within-metagenome similarity filter.** Remove any read that is ≥90% similar (identity and coverage) to a read already kept. The tool oversamples and refills to try to reach the target count. Use to reduce near-duplicate sequences in a single metagenome. |
 | `--train-test-split` | **Train/test split with similarity filter.** Percentage of reads for training (e.g. 80). Outputs `*_train.fasta` and `*_test.fasta`. Any test read that is ≥ similarity threshold (default 90% identity over 80% length) to a train read is removed. Use for quick evaluation from one metagenome while avoiding inflated metrics from near-duplicate train/test pairs. |
+
+---
+
+### Sequencing platform error model (Illumina-like)
+
+**Purpose:** Simulate **platform-specific** sequencing errors so that synthetic reads behave like real short-read data (e.g. Illumina). Tools such as Grinder, CAMISIM, and MetLab use similar models for benchmarking.
+
+**Why it matters:**
+
+- **Realistic benchmarking** — Classifiers are often trained or deployed on Illumina (or similar) data, where base quality drops toward the 3′ end and substitutions dominate over indels. Using error-free or uniformly random mutations can overestimate performance; a position-dependent Illumina-like model makes benchmarks more representative of production data.
+- **Robustness** — Evaluating on reads with platform-like noise shows how well a model generalizes to real sequencing errors rather than only to ideal sequences.
+- **Reproducibility** — With `--seed`, the same error pattern is applied every time, so results are comparable across runs.
+
+**Usage:** Add `--error-model illumina` to `chunk` or `pipeline`. The Illumina-like model applies **position-dependent substitution** only (no indels): error rate is low at the 5′ end and increases toward the 3′ end, matching typical quality decay. Use with `--seed` for reproducible datasets.
+
+```bash
+metagenome-generator chunk --input output/downloaded --output metagenome.fasta --output-dir output/metagenome \
+  --sequence-length 250 --reads-per-organism 1000 --error-model illumina --seed 42
+```
 
 ---
 
@@ -211,6 +233,38 @@ metagenome-generator snapshot
 ```
 
 By default, each category stores `create_date` and `title` per accession (for temporal split and auditing). Use `--no-metadata` for lists only. Use `--complete-only` to restrict to complete genomes; then use that snapshot with `--accessions-file` for reproducible complete-only runs. Legacy snapshots: `metagenome-generator migrate-snapshot <path>`.
+
+---
+
+### Structured benchmark recipe
+
+**Purpose:** Generate **fixed-N-per-category** benchmark datasets with **optional replicates** in one command. Each replicate uses a different random sample of genomes from your snapshot (and a distinct seed for chunking), so you get R comparable datasets (e.g. for reporting mean ± std or running multiple evaluation runs). No NCBI search at recipe time—everything is sampled from the snapshot, so runs are **reproducible** and **fast** after the first snapshot.
+
+**Strengths:**
+
+- **Comparable to published benchmarks** — Same design as in tools like VirSorter2 (e.g. 50 per category, 5 replicates). Fixed N per category avoids ad-hoc choices and makes your numbers directly comparable to papers.
+- **Reproducible** — One snapshot + one seed gives the same replicate structure every time. Share the snapshot and seed and others can regenerate the same benchmark.
+- **Fair evaluation** — Balanced design (e.g. 50 viral, 50 bacterial, 50 plasmid) avoids class imbalance and makes metrics interpretable.
+- **One command** — No manual scripting of “download 50+50, chunk, repeat with another seed.” One subcommand produces `replicate_001/`, `replicate_002/`, … each with `downloaded/` and `metagenome/metagenome.fasta`.
+
+**Example:**
+
+```bash
+# 1. Create a snapshot once (or use an existing one)
+metagenome-generator snapshot --output snapshots/accession_snapshot_2026-03-10.json
+
+# 2. Run the recipe: 50 bacterial + 50 viral per replicate, 5 replicates, seed 42
+metagenome-generator benchmark-recipe \
+  --accessions-file snapshots/accession_snapshot_2026-03-10.json \
+  --output-dir benchmarks/run1 \
+  --per-category 50 \
+  --replicates 5 \
+  --seed 42 \
+  --sequence-length 250 \
+  --reads-per-organism 1000
+```
+
+Output: `benchmarks/run1/replicate_001/downloaded/`, `benchmarks/run1/replicate_001/metagenome/metagenome.fasta`, and so on for `replicate_002` … `replicate_005`. Optional: `--archaea 50`, `--plasmid 50` to include archaea/plasmid in each replicate; `--output metagenome.fasta` to set the FASTA filename.
 
 ---
 
@@ -337,6 +391,7 @@ Or add `--run-seeker` to the pipeline.
 | `migrate-snapshot` | Convert legacy snapshot to per-category metadata format. |
 | `blastn-filter` | BLAST non-viral vs viral; EVE intervals for chunk and optional provirus/EVE FASTA. |
 | `viral-taxonomy` | Fetch viral taxonomy; write viral_1→group JSON for `--balance-viral-by-taxonomy`. |
+| `benchmark-recipe` | **Structured benchmark:** fixed N per category, R replicates; samples from snapshot, no NCBI search. |
 | `seeker` | Run Seeker on a metagenome FASTA. |
 
 Full options: `metagenome-generator <command> --help`.
@@ -354,10 +409,12 @@ Full options: `metagenome-generator <command> --help`.
 | EVE removal / export | BLAST non-viral vs viral; exclude/export provirus regions. |
 | Similarity filtering | Drop test reads similar to train (both temporal and percentage split). |
 | Mutation simulation | Substitution/indel rates for robustness tests. |
+| **Sequencing platform error model** | Illumina-like position-dependent errors for realistic short-read benchmarking. |
 | Extra viral FASTA | Merge user viral sequences with RefSeq viral. |
 | Genome completeness | `--complete-only` in snapshot and download. |
 | Abundance model | Per-category or per-genome (e.g. exponential) weights. |
 | Taxonomy-aware viral balance | Balance viral reads by family/realm. |
+| **Structured benchmark recipe** | Fixed N per category, R replicates; one command; comparable, reproducible, balanced. |
 | Ambiguous-base filter | Exclude reads with N (e.g. `--forbid-ambiguous`). |
 | Seeker integration | Run Seeker from the same workflow. |
 
@@ -383,6 +440,7 @@ MetagenomeGenerator/
 │   ├── similarity_filter.py
 │   ├── temporal_split.py
 │   ├── viral_taxonomy.py
+│   ├── benchmark_recipe.py
 │   └── seeker_wrapper.py
 ├── snapshots/
 └── working_directory/

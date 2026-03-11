@@ -18,6 +18,7 @@ from .genome_layout import validate_genome_dir
 from .similarity_filter import filter_test_against_train
 from .temporal_split import run_temporal_split, run_temporal_split_info
 from .viral_taxonomy import run_viral_taxonomy
+from .benchmark_recipe import run_benchmark_recipe
 
 # Organized output layout (pipeline): one root dir with step-based subdirs for easy navigation.
 OUTPUT_DIR_DOWNLOADED = "downloaded"
@@ -274,6 +275,14 @@ def _add_chunk_subparser(subparsers) -> None:
         "--balance-viral-by-taxonomy",
         action="store_true",
         help="Balance viral reads by taxonomy group so each group contributes equally. Requires --viral-taxonomy.",
+    )
+    p.add_argument(
+        "--error-model",
+        type=str,
+        default=None,
+        choices=["illumina"],
+        metavar="MODEL",
+        help="Apply platform-specific sequencing errors (e.g. illumina: position-dependent substitution, higher toward 3'). Use --seed for reproducibility.",
     )
     p.set_defaults(func=_run_chunk)
 
@@ -539,6 +548,14 @@ def _add_pipeline_subparser(subparsers) -> None:
         "--balance-viral-by-taxonomy",
         action="store_true",
         help="Balance viral reads by taxonomy group (requires --viral-taxonomy).",
+    )
+    p.add_argument(
+        "--error-model",
+        type=str,
+        default=None,
+        choices=["illumina"],
+        metavar="MODEL",
+        help="Apply platform-specific sequencing errors when chunking (e.g. illumina: position-dependent substitution). Use --seed for reproducibility.",
     )
     p.set_defaults(func=_run_pipeline)
 
@@ -825,6 +842,109 @@ def _run_viral_taxonomy(args) -> None:
     )
 
 
+def _add_benchmark_recipe_subparser(subparsers) -> None:
+    p = subparsers.add_parser(
+        "benchmark-recipe",
+        help="Structured benchmark: fixed N genomes per category, optional replicates. Uses snapshot; no NCBI search.",
+    )
+    p.add_argument(
+        "--accessions-file",
+        type=Path,
+        required=True,
+        metavar="PATH",
+        help="Snapshot JSON (from snapshot command). Genomes are sampled from this file.",
+    )
+    p.add_argument(
+        "--output-dir",
+        type=Path,
+        required=True,
+        metavar="PATH",
+        help="Output directory. Creates replicate_001/, replicate_002/, ... each with downloaded/ and metagenome/.",
+    )
+    p.add_argument(
+        "--per-category",
+        type=int,
+        default=50,
+        metavar="N",
+        help="Number of genomes per category (bacterial and viral). Default: 50",
+    )
+    p.add_argument(
+        "--archaea",
+        type=int,
+        default=0,
+        help="Number of archaeal genomes per replicate (optional). Default: 0",
+    )
+    p.add_argument(
+        "--plasmid",
+        type=int,
+        default=0,
+        help="Number of plasmid genomes per replicate (optional). Default: 0",
+    )
+    p.add_argument(
+        "--replicates",
+        type=int,
+        default=5,
+        metavar="R",
+        help="Number of replicate benchmark datasets. Default: 5",
+    )
+    p.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Base random seed; each replicate uses seed + replicate_index. Default: 42",
+    )
+    p.add_argument(
+        "--sequence-length",
+        type=int,
+        default=250,
+        help="Read length (nt). Default: 250",
+    )
+    p.add_argument(
+        "--reads-per-organism",
+        type=int,
+        default=1000,
+        help="Max reads per genome per replicate. Default: 1000",
+    )
+    p.add_argument(
+        "--output",
+        type=str,
+        default="metagenome.fasta",
+        help="Metagenome FASTA filename inside each replicate's metagenome/ dir. Default: metagenome.fasta",
+    )
+    p.set_defaults(func=_run_benchmark_recipe)
+
+
+def _run_benchmark_recipe(args) -> None:
+    if not args.accessions_file.exists():
+        raise SystemExit(f"--accessions-file not found: {args.accessions_file}")
+    if args.per_category < 1:
+        raise SystemExit("--per-category must be >= 1")
+    if args.replicates < 1:
+        raise SystemExit("--replicates must be >= 1")
+    if args.archaea < 0 or args.plasmid < 0:
+        raise SystemExit("--archaea and --plasmid must be >= 0")
+
+    def progress(rep_num: int, total: int, msg: str) -> None:
+        print(f"  [{rep_num}/{total}] {msg}", flush=True)
+
+    paths = run_benchmark_recipe(
+        args.accessions_file,
+        args.output_dir,
+        args.per_category,
+        args.replicates,
+        seed=args.seed,
+        n_archaea=args.archaea,
+        n_plasmid=args.plasmid,
+        sequence_length=args.sequence_length,
+        reads_per_organism=args.reads_per_organism,
+        output_fasta_name=args.output,
+        progress_callback=progress,
+    )
+    print(f"Done. Wrote {len(paths)} replicate metagenomes to {args.output_dir}")
+    for p in paths:
+        print(f"  {p}")
+
+
 def _run_temporal_split_info(args) -> None:
     run_temporal_split_info(
         args.accessions_file,
@@ -943,6 +1063,7 @@ def _run_chunk(args) -> None:
         abundance_distribution=abundance_dist,
         viral_taxonomy_json=viral_tax_path,
         balance_viral_by_taxonomy=balance_viral,
+        error_model=getattr(args, "error_model", None),
     )
     print(f"Wrote {count} sequences to {out_path}")
 
@@ -1123,6 +1244,7 @@ def _run_pipeline(args) -> None:
         abundance_distribution=abundance_dist,
         viral_taxonomy_json=viral_tax_path,
         balance_viral_by_taxonomy=balance_viral,
+        error_model=getattr(args, "error_model", None),
     )
     if do_train_test_split:
         _count, records = result
@@ -1201,7 +1323,7 @@ def _run_temporal_split(args) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Metagenome simulator (download, snapshot, migrate-snapshot, chunk, pipeline, blastn-filter, viral-taxonomy, seeker, temporal-split, temporal-split-info, filter-test-against-train)",
+        description="Metagenome simulator (download, snapshot, chunk, pipeline, blastn-filter, viral-taxonomy, seeker, temporal-split, temporal-split-info, filter-test-against-train, benchmark-recipe)",
     )
     subparsers = parser.add_subparsers(dest="command")
     subparsers.required = True
@@ -1217,6 +1339,7 @@ def main() -> None:
     _add_temporal_split_info_subparser(subparsers)
     _add_filter_test_against_train_subparser(subparsers)
     _add_viral_taxonomy_subparser(subparsers)
+    _add_benchmark_recipe_subparser(subparsers)
 
     args = parser.parse_args()
     args.func(args)

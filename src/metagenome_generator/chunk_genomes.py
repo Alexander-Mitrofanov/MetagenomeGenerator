@@ -137,6 +137,42 @@ def _compute_read_limits(
 
 BASES = "ACGT"
 
+# Illumina-like position-dependent error: low at 5', higher at 3' (quality drop)
+ILLUMINA_BASE_ERROR = 0.001   # ~0.1% at start of read
+ILLUMINA_END_ERROR = 0.012    # ~1.2% toward end (typical for 250 bp)
+
+
+def _apply_illumina_like_errors(
+    seq_str: str,
+    rng: random.Random,
+    base_error: float = ILLUMINA_BASE_ERROR,
+    end_error: float = ILLUMINA_END_ERROR,
+) -> str:
+    """Apply position-dependent substitution errors (Illumina-like: higher error toward 3' end).
+
+    No indels (Illumina indel rate is very low). Uses rng for reproducibility.
+    """
+    if base_error <= 0 and end_error <= 0:
+        return seq_str
+    seq_str = seq_str.upper()
+    L = len(seq_str)
+    if L == 0:
+        return seq_str
+    out: list[str] = []
+    for i, c in enumerate(seq_str):
+        if c not in BASES:
+            out.append(c)
+            continue
+        # Linear increase from 5' to 3'
+        t = i / max(1, L - 1)
+        rate = base_error + (end_error - base_error) * t
+        if rate > 0 and rng.random() < rate:
+            others = [b for b in BASES if b != c]
+            out.append(rng.choice(others) if others else c)
+        else:
+            out.append(c)
+    return "".join(out)
+
 
 def _apply_mutations(
     seq_str: str,
@@ -181,6 +217,19 @@ def _apply_mutations_to_record(
 ) -> SeqRecord:
     """Return a new SeqRecord with mutations applied to the sequence. Preserves id and description."""
     new_seq = _apply_mutations(str(rec.seq), substitution_rate, indel_rate, rng)
+    return SeqRecord(Seq(new_seq), id=rec.id, description=rec.description)
+
+
+def _apply_error_model_to_record(
+    rec: SeqRecord,
+    error_model: str,
+    rng: random.Random,
+) -> SeqRecord:
+    """Apply platform-specific error model (e.g. Illumina) to a record. Preserves id and description."""
+    if error_model == "illumina":
+        new_seq = _apply_illumina_like_errors(str(rec.seq), rng)
+    else:
+        return rec
     return SeqRecord(Seq(new_seq), id=rec.id, description=rec.description)
 
 
@@ -299,19 +348,21 @@ def _collect_chunks_for_file(
     allow_ambiguous: bool = True,
     substitution_rate: float = 0.0,
     indel_rate: float = 0.0,
+    error_model: str | None = None,
     mutation_rng: random.Random | None = None,
 ) -> list[SeqRecord]:
     """Collect chunks for a single FASTA file (fixed- or variable-length).
 
     Skips chunks overlapping EVE if eve_intervals is given.
-    If substitution_rate or indel_rate > 0, applies mutations to each chunk (use mutation_rng for reproducibility).
+    If error_model is set (e.g. 'illumina'), applies platform-specific errors; else if substitution_rate or indel_rate > 0, applies uniform mutations.
     """
     from .blastn_filter import chunk_overlaps_eve
 
     chunks: list[SeqRecord] = []
     rng = random.Random(seed) if seed is not None else None
     use_eve = eve_intervals is not None
-    apply_mutations = (substitution_rate > 0 or indel_rate > 0) and mutation_rng is not None
+    apply_platform = error_model and mutation_rng is not None
+    apply_mutations = not apply_platform and (substitution_rate > 0 or indel_rate > 0) and mutation_rng is not None
 
     for record in SeqIO.parse(fp, "fasta"):
         key = (prefix, record.id)
@@ -329,7 +380,9 @@ def _collect_chunks_for_file(
                     rec = item
                 if not _is_allowed_sequence(rec, allow_ambiguous):
                     continue
-                if apply_mutations:
+                if apply_platform:
+                    rec = _apply_error_model_to_record(rec, error_model, mutation_rng)
+                elif apply_mutations:
                     rec = _apply_mutations_to_record(rec, substitution_rate, indel_rate, mutation_rng)
                 chunks.append(rec)
         else:
@@ -344,7 +397,9 @@ def _collect_chunks_for_file(
                     rec = item
                 if not _is_allowed_sequence(rec, allow_ambiguous):
                     continue
-                if apply_mutations:
+                if apply_platform:
+                    rec = _apply_error_model_to_record(rec, error_model, mutation_rng)
+                elif apply_mutations:
                     rec = _apply_mutations_to_record(rec, substitution_rate, indel_rate, mutation_rng)
                 chunks.append(rec)
         break
@@ -363,19 +418,22 @@ def _collect_chunks_from_multirecord_fasta(
     allow_ambiguous: bool = True,
     substitution_rate: float = 0.0,
     indel_rate: float = 0.0,
+    error_model: str | None = None,
 ) -> list[SeqRecord]:
     """Collect chunks from a multi-record FASTA (e.g. metavirome contigs). No EVE filtering.
 
     Each record is chunked with prefix prefix_base_0, prefix_base_1, ... Same length/balance
-    and mutation logic as main input; use seed for reproducibility.
+    and mutation/error-model logic as main input; use seed for reproducibility.
     """
     chunks: list[SeqRecord] = []
-    use_mutations = substitution_rate > 0 or indel_rate > 0
+    use_platform = bool(error_model)
+    use_mutations = not use_platform and (substitution_rate > 0 or indel_rate > 0)
     for rec_idx, record in enumerate(SeqIO.parse(fp, "fasta")):
         prefix = f"{prefix_base}_{rec_idx}"
         file_seed = (seed + 20000 + rec_idx) if seed is not None else None
         rng = random.Random(file_seed) if file_seed is not None else None
-        file_mutation_rng = random.Random(seed + 30000 + rec_idx) if use_mutations else None
+        file_mutation_rng = random.Random(seed + 30000 + rec_idx) if (use_platform or use_mutations) else None
+        apply_platform_here = use_platform and file_mutation_rng is not None
         apply_mutations = use_mutations and file_mutation_rng is not None
         if min_length is not None and max_length is not None:
             for item in chunk_sequence_variable(
@@ -384,7 +442,9 @@ def _collect_chunks_from_multirecord_fasta(
                 rec = item
                 if not _is_allowed_sequence(rec, allow_ambiguous):
                     continue
-                if apply_mutations:
+                if apply_platform_here:
+                    rec = _apply_error_model_to_record(rec, error_model, file_mutation_rng)
+                elif apply_mutations:
                     rec = _apply_mutations_to_record(rec, substitution_rate, indel_rate, file_mutation_rng)
                 chunks.append(rec)
         else:
@@ -393,7 +453,9 @@ def _collect_chunks_from_multirecord_fasta(
                     break
                 if not _is_allowed_sequence(rec, allow_ambiguous):
                     continue
-                if apply_mutations:
+                if apply_platform_here:
+                    rec = _apply_error_model_to_record(rec, error_model, file_mutation_rng)
+                elif apply_mutations:
                     rec = _apply_mutations_to_record(rec, substitution_rate, indel_rate, file_mutation_rng)
                 chunks.append(rec)
     return chunks
@@ -425,12 +487,13 @@ def build_metagenome(
     abundance_distribution: str | None = None,
     viral_taxonomy_json: Path | None = None,
     balance_viral_by_taxonomy: bool = False,
+    error_model: str | None = None,
 ) -> int | tuple[int, list[SeqRecord]]:
     """Build a metagenome FASTA from input_path. Fixed-length or variable-length (min_length–max_length) contigs.
 
     If cap_total_reads is set, randomly downsample to that many reads (for balancing negative to positive).
     If eve_intervals is set, chunks overlapping those intervals (EVE regions) are excluded.
-    If substitution_rate or indel_rate > 0, applies mutations to each chunk (seed used for reproducibility; default 42).
+    If error_model is set (e.g. 'illumina'), applies platform-specific position-dependent errors; else if substitution_rate or indel_rate > 0, applies uniform mutations (seed used for reproducibility; default 42).
     If filter_similar is True: generate more chunks than needed (oversample), filter out sequences that are
     >= similarity_threshold (default 90%%) similar to any already-kept sequence, then refill until target or max rounds.
     If return_records is True, do not write to out_path and return (count, list[SeqRecord]) for train-test split.
@@ -442,7 +505,7 @@ def build_metagenome(
     """
     from .similarity_filter import filter_by_similarity, filter_candidates_against_kept
 
-    use_mutations = substitution_rate > 0 or indel_rate > 0
+    use_mutations = substitution_rate > 0 or indel_rate > 0 or bool(error_model)
     if extra_viral_fasta is not None and not extra_viral_fasta.is_file():
         raise FileNotFoundError(f"extra_viral_fasta not found or not a file: {extra_viral_fasta}")
     if use_mutations and seed is None:
@@ -517,6 +580,7 @@ def build_metagenome(
             allow_ambiguous=allow_ambiguous,
             substitution_rate=substitution_rate,
             indel_rate=indel_rate,
+            error_model=error_model,
             mutation_rng=file_mutation_rng,
         )
         all_chunks.extend(chunks)
@@ -534,6 +598,7 @@ def build_metagenome(
             allow_ambiguous=allow_ambiguous,
             substitution_rate=substitution_rate,
             indel_rate=indel_rate,
+            error_model=error_model,
         )
         all_chunks.extend(extra_chunks)
         logger.info("Extra viral FASTA: added %d chunks from %s", len(extra_chunks), extra_viral_fasta)
@@ -578,6 +643,7 @@ def build_metagenome(
                     allow_ambiguous=allow_ambiguous,
                     substitution_rate=substitution_rate,
                     indel_rate=indel_rate,
+                    error_model=error_model,
                     mutation_rng=file_mutation_rng,
                 )
                 more_chunks.extend(chunks)
