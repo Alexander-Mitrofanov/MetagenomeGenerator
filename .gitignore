@@ -35,6 +35,9 @@ snapshots/*.log
 # Local-only docs (excluded from GitHub; do not push)
 docs/
 
+# InSilicoSeq comparison (local only; do not push)
+insilicoseq_comparison/
+
 # Test and coverage
 .pytest_cache/
 .coverage

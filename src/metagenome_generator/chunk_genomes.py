@@ -10,6 +10,7 @@ Exposes `build_metagenome` for programmatic use and a CLI when run directly.
 
 import argparse
 import logging
+import math
 import random
 from pathlib import Path
 
@@ -231,6 +232,24 @@ def _apply_error_model_to_record(
     else:
         return rec
     return SeqRecord(Seq(new_seq), id=rec.id, description=rec.description)
+
+
+def _illumina_phred_at_position(i: int, length: int) -> int:
+    """Return Phred quality (0–41) for position i (0-based) in a read of length, matching our Illumina-like error profile."""
+    if length <= 0:
+        return 30
+    t = i / max(1, length - 1)
+    rate = ILLUMINA_BASE_ERROR + (ILLUMINA_END_ERROR - ILLUMINA_BASE_ERROR) * t
+    rate = max(1e-10, min(1.0, rate))
+    q = -10.0 * math.log10(rate)
+    return int(min(41, max(0, round(q))))
+
+
+def add_illumina_qualities_to_record(rec: SeqRecord) -> SeqRecord:
+    """Add letter_annotations['phred_quality'] to a SeqRecord (Illumina-like position-dependent). Returns same record, modified in place."""
+    L = len(rec.seq)
+    rec.letter_annotations["phred_quality"] = [_illumina_phred_at_position(i, L) for i in range(L)]
+    return rec
 
 
 def chunk_sequence(record, prefix: str, chunk_size: int, yield_coords: bool = False):
@@ -488,12 +507,15 @@ def build_metagenome(
     viral_taxonomy_json: Path | None = None,
     balance_viral_by_taxonomy: bool = False,
     error_model: str | None = None,
+    output_fastq: bool = False,
+    write_abundance: bool = False,
 ) -> int | tuple[int, list[SeqRecord]]:
     """Build a metagenome FASTA from input_path. Fixed-length or variable-length (min_length–max_length) contigs.
 
     If cap_total_reads is set, randomly downsample to that many reads (for balancing negative to positive).
     If eve_intervals is set, chunks overlapping those intervals (EVE regions) are excluded.
     If error_model is set (e.g. 'illumina'), applies platform-specific position-dependent errors; else if substitution_rate or indel_rate > 0, applies uniform mutations (seed used for reproducibility; default 42).
+    If output_fastq is True, writes FASTQ instead of FASTA: applies Illumina-like errors and adds position-dependent Phred quality scores per base (output path suffix becomes .fastq).
     If filter_similar is True: generate more chunks than needed (oversample), filter out sequences that are
     >= similarity_threshold (default 90%%) similar to any already-kept sequence, then refill until target or max rounds.
     If return_records is True, do not write to out_path and return (count, list[SeqRecord]) for train-test split.
@@ -502,13 +524,16 @@ def build_metagenome(
     If abundance_profile is set (e.g. {"bacterial": 0.5, "viral": 2.0}), scale reads per file by category.
     If abundance_distribution == "exponential", assign per-genome weights from Exp(1) (use seed for reproducibility).
     If viral_taxonomy_json and balance_viral_by_taxonomy, viral read limits are set so each taxonomy group (e.g. family) contributes equally.
+    If write_abundance is True, write a tab-separated file next to the output (stem_abundance.txt) with columns: genome_id (prefix), read_count, proportion (ground-truth composition for benchmarking).
     """
     from .similarity_filter import filter_by_similarity, filter_candidates_against_kept
 
+    if output_fastq and not error_model:
+        error_model = "illumina"
     use_mutations = substitution_rate > 0 or indel_rate > 0 or bool(error_model)
     if extra_viral_fasta is not None and not extra_viral_fasta.is_file():
         raise FileNotFoundError(f"extra_viral_fasta not found or not a file: {extra_viral_fasta}")
-    if use_mutations and seed is None:
+    if (use_mutations or output_fastq) and seed is None:
         seed = 42
     mutation_rng = random.Random(seed) if use_mutations else None
 
@@ -675,9 +700,42 @@ def build_metagenome(
             rng = random.Random(seed)
             all_chunks = rng.sample(all_chunks, cap_total_reads)
 
+    def _write_abundance_file(records: list[SeqRecord], path: Path) -> None:
+        """Write genome_id, read_count, proportion to a tab-separated file (ground-truth for benchmarking)."""
+        from collections import Counter
+        counts: Counter[str] = Counter()
+        for rec in records:
+            if "_chunk_" in rec.id:
+                prefix = rec.id.rsplit("_chunk_", 1)[0]
+            elif "_contig_" in rec.id:
+                prefix = rec.id.rsplit("_contig_", 1)[0]
+            else:
+                prefix = rec.id.split()[0]
+            counts[prefix] += 1
+        total = sum(counts.values())
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w") as f:
+            f.write("genome_id\tread_count\tproportion\n")
+            for prefix in sorted(counts):
+                n = counts[prefix]
+                f.write(f"{prefix}\t{n}\t{n / total}\n")
+
     if return_records:
+        if output_fastq:
+            for rec in all_chunks:
+                add_illumina_qualities_to_record(rec)
         return len(all_chunks), all_chunks
+    if output_fastq:
+        for rec in all_chunks:
+            add_illumina_qualities_to_record(rec)
+        write_path = out_path if out_path.suffix.lower() == ".fastq" else out_path.with_suffix(".fastq")
+        count = SeqIO.write(all_chunks, write_path, "fastq")
+        if write_abundance:
+            _write_abundance_file(all_chunks, write_path.with_stem(write_path.stem + "_abundance").with_suffix(".txt"))
+        return int(count)
     count = SeqIO.write(all_chunks, out_path, "fasta")
+    if write_abundance:
+        _write_abundance_file(all_chunks, out_path.with_stem(out_path.stem + "_abundance").with_suffix(".txt"))
     return int(count)
 
 
@@ -693,12 +751,13 @@ def split_train_test_and_write(
     work_dir: Path | None = None,
     blast_batch_size: int = 2000,
     blast_num_threads: int = 4,
+    write_fastq: bool = False,
 ) -> tuple[int, int]:
-    """Split records into train (train_pct%%) and test; remove from test any sequence similar to train; write train and test FASTAs.
+    """Split records into train (train_pct%%) and test; remove from test any sequence similar to train; write train and test FASTA or FASTQ.
 
     Similarity check: BLAST (megablast task, faster for high identity) of test vs train DB in batches;
     test sequences with a hit >= similarity_threshold over min_coverage of length are dropped.
-    Returns (n_train, n_test_after_filter). Output files: {output_stem}_train.fasta, {output_stem}_test.fasta in output_dir.
+    Returns (n_train, n_test_after_filter). If write_fastq, outputs .fastq (records must have phred_quality); else .fasta.
     """
     from .similarity_filter import filter_candidates_against_kept
 
@@ -707,11 +766,13 @@ def split_train_test_and_write(
     train_pct = max(0.0, min(100.0, train_pct))
     n_train_target = max(1, int(len(records) * train_pct / 100.0))
     n_test_target = len(records) - n_train_target
+    ext = "fastq" if write_fastq else "fasta"
+    fmt = "fastq" if write_fastq else "fasta"
     if n_train_target <= 0 or n_test_target <= 0:
         logger.warning("Train-test split: not enough sequences (%d); writing all to train", len(records))
-        train_path = output_dir / f"{output_stem}_train.fasta"
-        SeqIO.write(records, train_path, "fasta")
-        (output_dir / f"{output_stem}_test.fasta").write_text("")
+        train_path = output_dir / f"{output_stem}_train.{ext}"
+        SeqIO.write(records, train_path, fmt)
+        (output_dir / f"{output_stem}_test.{ext}").write_text("")
         return len(records), 0
 
     rng = random.Random(seed)
@@ -740,10 +801,10 @@ def split_train_test_and_write(
         )
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    train_path = output_dir / f"{output_stem}_train.fasta"
-    test_path = output_dir / f"{output_stem}_test.fasta"
-    SeqIO.write(train_list, train_path, "fasta")
-    SeqIO.write(test_filtered, test_path, "fasta")
+    train_path = output_dir / f"{output_stem}_train.{ext}"
+    test_path = output_dir / f"{output_stem}_test.{ext}"
+    SeqIO.write(train_list, train_path, fmt)
+    SeqIO.write(test_filtered, test_path, fmt)
     return len(train_list), len(test_filtered)
 
 
@@ -857,6 +918,16 @@ def _cli(argv: list[str] | None = None) -> None:
         default=90.0,
         help="Max BLASTN percent identity for train-test: remove from test if similar to train above this. Default: 90",
     )
+    parser.add_argument(
+        "--output-fastq",
+        action="store_true",
+        help="Write FASTQ instead of FASTA, with per-base Phred quality scores (Illumina-like position-dependent). Use --seed for reproducibility.",
+    )
+    parser.add_argument(
+        "--write-abundance",
+        action="store_true",
+        help="Write a tab-separated abundance file (genome_id, read_count, proportion) next to the output for ground-truth benchmarking.",
+    )
     args = parser.parse_args(argv)
 
     if not args.input.exists():
@@ -902,6 +973,7 @@ def _cli(argv: list[str] | None = None) -> None:
 
     do_train_test_split = getattr(args, "train_test_split", None) is not None
     allow_ambiguous = not getattr(args, "forbid_ambiguous", False)
+    output_fastq_flag = getattr(args, "output_fastq", False)
     result = build_metagenome(
         args.input,
         out_path,
@@ -918,6 +990,8 @@ def _cli(argv: list[str] | None = None) -> None:
         similarity_min_coverage=getattr(args, "similarity_min_coverage", 0.8),
         oversample_factor=getattr(args, "oversample_factor", 2.0),
         return_records=do_train_test_split,
+        output_fastq=output_fastq_flag,
+        write_abundance=getattr(args, "write_abundance", False),
     )
     if do_train_test_split:
         _count, records = result
@@ -930,12 +1004,16 @@ def _cli(argv: list[str] | None = None) -> None:
             output_stem,
             similarity_threshold=getattr(args, "train_test_similarity_threshold", 90.0),
             similarity_min_coverage=0.8,
+            write_fastq=output_fastq_flag,
         )
-        train_path = args.output_dir / f"{output_stem}_train.fasta"
-        test_path = args.output_dir / f"{output_stem}_test.fasta"
+        ext = "fastq" if output_fastq_flag else "fasta"
+        train_path = args.output_dir / f"{output_stem}_train.{ext}"
+        test_path = args.output_dir / f"{output_stem}_test.{ext}"
         print(f"Train-test split ({args.train_test_split}% train): wrote {n_train} to {train_path}, {n_test} to {test_path}")
     else:
         count = result
+        if output_fastq_flag:
+            out_path = out_path if out_path.suffix.lower() == ".fastq" else out_path.with_suffix(".fastq")
         if args.cap_total_reads is not None and count == args.cap_total_reads:
             print(f"Wrote {count} sequences (capped) to {out_path}")
         else:

@@ -42,15 +42,17 @@ Metagenome Generator downloads bacterial, viral, archaeal, and plasmid genomes f
 
 ## Use cases at a glance
 
-| Use case | What you want | Command or flow |
-|----------|----------------|------------------|
-| **Single metagenome** | One FASTA for training or benchmarking | `pipeline --num-bacteria N --num-virus N --output-dir out --output metagenome.fasta --sequence-length 250 --reads-per-organism 1000` |
-| **Reproducible run** | Same genomes every time | `snapshot` → save JSON; then `download --accessions-file <json>` (and chunk) or use that file in `pipeline` |
-| **Temporal train/test** | Train on “old” genomes, test on “new” (e.g. for generalization) | `temporal-split-info` → `temporal-split` → build train and test metagenomes → **`filter-test-against-train`** (important: removes test reads similar to train) |
-| **Single metagenome + train/test** | One dataset split 80/20 with similarity filter | `chunk` or `pipeline` with `--train-test-split 80` (similarity filter applied automatically) |
-| **Structured benchmark** | Fixed N per category, multiple replicates (e.g. for method comparison) | `snapshot` → `benchmark-recipe --accessions-file <snap> --output-dir out --per-category 50 --replicates 5` |
+**Accession snapshot and why it exists.** NCBI’s RefSeq catalog changes over time (new submissions, retractions, taxonomy updates). If you search and download “N bacterial and N viral genomes” on different dates, you get different accession sets, so experiments are not reproducible. The **snapshot** command records the **current catalog** of matching accessions (bacterial, viral, archaeal, plasmid) to a date-stamped JSON **without downloading sequences**. That JSON is a frozen accession list: later, `download --accessions-file <json>` (or `pipeline` with the same file) fetches exactly those accessions, so the same snapshot always yields the same genome set. Snapshots can be large (tens or hundreds of thousands of IDs); use **`--max-bacteria N --max-virus M`** (and **`--sample-seed`**) with `--accessions-file` to download a reproducible random subset. Summary: **snapshot = reproducible genome selection**; **download with accessions-file = same genomes every time**.
 
-For all runs, use a dedicated output directory (e.g. `working_directory/`).
+| Use case | Objective | Command or flow |
+|----------|-----------|------------------|
+| **Single metagenome** | Generate one synthetic metagenome FASTA (fixed or variable read length) for classifier training or method benchmarking, with controlled genome counts and read parameters. | `pipeline --num-bacteria N --num-virus N --output-dir out --output metagenome.fasta --sequence-length 250 --reads-per-organism 1000` |
+| **Reproducible genome set** | Fix the set of genomes used across runs and machines: record the catalog once with `snapshot`, then download and chunk from that list so that results depend only on the snapshot and seeds, not on NCBI’s current state. Optionally limit to a subset with `--max-bacteria`, `--max-virus`, and `--sample-seed`. | `snapshot` → save JSON; then `download --accessions-file <json>` (and chunk) or use that file in `pipeline`. To use a subset: add `--max-bacteria N --max-virus M --sample-seed 42`. |
+| **Temporal train/test** | Evaluate generalization to “future” genomes: train on accessions submitted before a cutoff date and test on accessions on or after that date, with BLAST-based removal of test reads that are highly similar to train (avoids inflated metrics from near-identical strains). | `temporal-split-info` → `temporal-split` → build train and test metagenomes from the two JSONs → **`filter-test-against-train`** to drop test reads similar to train. |
+| **Single-dataset train/test** | Split one synthetic metagenome into train and test fractions (e.g. 80/20) with automatic removal of test reads that are ≥ threshold similar to train, for quick evaluation without temporal split. | `chunk` or `pipeline` with `--train-test-split 80` (similarity filter applied automatically). |
+| **Structured benchmark** | Produce multiple replicate datasets with fixed N genomes per category (e.g. 50 bacterial, 50 viral per replicate) sampled from a snapshot, for method comparison and reporting mean ± std across replicates in a standardized way. | `snapshot` → `benchmark-recipe --accessions-file <snap> --output-dir out --per-category 50 --replicates 5` |
+
+Use a dedicated output directory (e.g. `working_directory/`) for all runs.
 
 ---
 
@@ -140,6 +142,16 @@ Obtain RefSeq genomes by category (bacteria, virus, archaea, plasmid) from NCBI 
 metagenome-generator download --num-bacteria 10 --num-virus 10 --output-dir output
 ```
 
+To use a **reproducible subset** from an existing snapshot (e.g. 50 bacterial + 50 viral) instead of downloading the whole file:
+
+```bash
+metagenome-generator download \
+  --accessions-file snapshots/accession_snapshot_2026-03-10.json \
+  --max-bacteria 50 --max-virus 50 \
+  --sample-seed 42 \
+  --output-dir output/downloaded
+```
+
 | Option | Use |
 |--------|-----|
 | `--num-bacteria` | **Number of bacterial genomes.** How many RefSeq bacterial genomes to fetch. Use for negative (non-viral) samples in viral vs. prokaryotic classifiers. Set to 0 only when using `--accessions-file` with a snapshot that has no bacterial list. |
@@ -147,9 +159,13 @@ metagenome-generator download --num-bacteria 10 --num-virus 10 --output-dir outp
 | `--num-archaea` | **Number of archaeal genomes.** Optional; default 0. Archaea are additional negative samples (non-viral). Use to broaden the diversity of non-viral sequences (e.g. for phage vs. bacteria + archaea). |
 | `--num-plasmid` | **Number of plasmid sequences.** Optional; default 0. Plasmids are additional negative samples. Use when you want to avoid classifying plasmid-derived reads as viral. |
 | `--output-dir` | **Output directory.** All category folders (`bacteria/`, `virus/`, etc.) are created under this path. Use a dedicated directory (e.g. `working_directory/downloaded/`) to keep runs organized. |
-| `--accessions-file` | **Reproducible run.** Path to a JSON file containing accession IDs (e.g. from `snapshot` or a previous `--save-accessions` run). NCBI search is skipped; exactly these accessions are downloaded. Use when you need the same genome set on every run (e.g. for benchmarks or paper reproducibility). |
+| `--accessions-file` | **Reproducible run.** Path to a JSON file containing accession IDs (e.g. from `snapshot` or a previous `--save-accessions` run). NCBI search is skipped; by default **all** accessions in the file are downloaded. Use when you need the same genome set on every run (e.g. for benchmarks or paper reproducibility). |
+| `--max-bacteria`, `--max-virus`, `--max-archaea`, `--max-plasmid` | **Limit how many to use from the snapshot.** When using `--accessions-file`, these set an upper bound per category: the tool takes a **random sample** of that many accessions (or all if the file has fewer). Omit to download the full snapshot. Example: `--accessions-file snap.json --max-bacteria 50 --max-virus 50` downloads 50 bacterial + 50 viral from the file. |
+| `--sample-seed` | **Reproducible subset.** When using `--max-*` with `--accessions-file`, seed for the random sample (default 42). Use the same seed to get the same subset on every run. |
 | `--save-accessions` | **Save chosen accessions.** After searching NCBI, write the selected accession lists and a UTC timestamp to this JSON path. Use this file later as `--accessions-file` to re-download the same set. Ignored when `--accessions-file` is set. |
 | `--complete-only` | **Complete genomes only.** When searching NCBI (no `--accessions-file`), restrict results to complete genomes and exclude WGS/draft (uses NCBI `complete[Properties]` and `NOT WGS[Properties]`). For reproducible complete-only runs, create a snapshot with `snapshot --complete-only` and use that JSON as `--accessions-file`. Ignored when using `--accessions-file`. |
+
+**Large snapshots:** A snapshot can contain tens or hundreds of thousands of accessions. Downloading the full set is often impractical. Use **`--max-bacteria N --max-virus M`** (and optionally `--max-archaea`, `--max-plasmid`) with **`--accessions-file`** to download only a subset; use **`--sample-seed`** for a reproducible subset.
 
 ---
 
@@ -178,6 +194,8 @@ metagenome-generator chunk \
 | `--forbid-ambiguous` | **Exclude ambiguous bases.** Discard any read that contains non-ACGT characters (e.g. N, R, Y). Use when your pipeline or classifier assumes strict ACGT-only sequence, or to simulate cleaner sequencing. |
 | `--substitution-rate`, `--indel-rate` | **Mutation simulation.** Introduce substitutions and/or indels at the given per-base rate (0–1). Use to test classifier robustness to sequencing error or divergence (e.g. 0.01 for 1% substitution rate). Combine with `--seed` for reproducible mutated datasets. |
 | `--error-model` | **Platform-specific sequencing errors.** Set to `illumina` to apply position-dependent substitution (low at 5′, higher toward 3′, mimicking Illumina quality drop). Use for realistic benchmarking when training or evaluating on short-read data. Use `--seed` for reproducibility. |
+| `--output-fastq` | **FASTQ output with quality scores.** Write **FASTQ** (single-end) instead of FASTA, with per-base Phred quality scores (Illumina-like position-dependent). Automatically enables Illumina-like errors so qualities match the sequence. Use when downstream tools expect FASTQ (e.g. aligners, variant callers). Use `--seed` for reproducibility. |
+| `--write-abundance` | **Ground-truth abundance file.** Write a tab-separated file `{output_stem}_abundance.txt` next to the metagenome (columns: genome_id, read_count, proportion). Use for benchmarking abundance estimators or when you need to know how many reads came from each genome. |
 | `--extra-viral-fasta` | **Merge user viral sequences.** Path to a FASTA of additional viral sequences (e.g. metavirome contigs, custom viral set). They are chunked like RefSeq viral genomes and merged into the viral pool. Use to combine public RefSeq viral data with your own viral contigs in one metagenome. |
 | `--abundance-profile` | **Per-category read weights.** Comma-separated `category=weight`, e.g. `bacterial=0.5,viral=2,archaea=1,plasmid=1`. Scales how many reads are taken from each category relative to the base limit. Use to simulate uneven community composition (e.g. more viral, less bacterial) without changing genome lists. |
 | `--abundance-distribution` | **Per-genome abundance model.** Set to `exponential` to assign each genome a weight from an exponential distribution (then normalized). Produces a few “abundant” and many “rare” genomes, similar to real communities. Use `--seed` for reproducibility. |
@@ -202,6 +220,34 @@ metagenome-generator chunk \
 ```bash
 metagenome-generator chunk --input output/downloaded --output metagenome.fasta --output-dir output/metagenome \
   --sequence-length 250 --reads-per-organism 1000 --error-model illumina --seed 42
+```
+
+**FASTQ output (`--output-fastq`):** Use `--output-fastq` to write **FASTQ** instead of FASTA, with per-base Phred quality scores (position-dependent, Illumina-like). The tool applies Illumina-like errors so that quality scores match the error profile. Output path uses `.fastq` (e.g. `metagenome.fastq`). Use when downstream tools expect FASTQ with quality scores (e.g. aligners, variant callers).
+
+```bash
+metagenome-generator chunk --input output/downloaded --output metagenome --output-dir output/metagenome \
+  --sequence-length 250 --reads-per-organism 1000 --output-fastq --seed 42
+# Writes output/metagenome/metagenome.fastq with Phred qualities
+```
+
+**Abundance file (`--write-abundance`):** Optionally write a **ground-truth abundance file** next to the metagenome (e.g. `metagenome_abundance.txt`): one row per genome with `genome_id`, `read_count`, and `proportion` (0–1). This is the known composition of the synthetic sample.
+
+**Strengths:**
+- **Benchmarking** — Compare predicted vs true per-genome (or per-taxon) abundances when evaluating abundance estimators, compositional methods, or classifiers that output proportions.
+- **Reproducibility** — See exactly how many reads came from each genome without re-parsing FASTQ headers or re-running the simulator; the file is a compact, human-readable summary.
+- **Downstream** — Feed the same format into pipelines that expect a sample composition or count table for validation, reporting, or as reference for method comparison.
+
+**Use cases:**
+- **Abundance estimation** — Train or test tools that predict taxon/genome proportions; use the file as ground truth for correlation, RMSE, or other metrics.
+- **Method papers** — Report “synthetic metagenomes with known composition” and attach the abundance file so reviewers or users can verify or reuse the setup.
+- **Quality control** — Quickly check that the simulated mix matches your intent (e.g. balanced vs skewed) without counting reads in the FASTQ.
+
+**Usage:** Add `--write-abundance` to `chunk` or `pipeline`. The file is written next to the main output (same stem + `_abundance.txt`). Works with both FASTA and FASTQ output.
+
+```bash
+metagenome-generator chunk --input output/downloaded --output metagenome.fasta --output-dir output/metagenome \
+  --sequence-length 250 --reads-per-organism 1000 --write-abundance
+# Creates output/metagenome/metagenome.fasta and output/metagenome/metagenome_abundance.txt
 ```
 
 ---
@@ -410,6 +456,8 @@ Full options: `metagenome-generator <command> --help`.
 | Similarity filtering | Drop test reads similar to train (both temporal and percentage split). |
 | Mutation simulation | Substitution/indel rates for robustness tests. |
 | **Sequencing platform error model** | Illumina-like position-dependent errors for realistic short-read benchmarking. |
+| **FASTQ output with qualities** | `--output-fastq`: single-end FASTQ with per-base Phred qualities and Illumina-like errors. |
+| **Abundance file (ground-truth)** | `--write-abundance`: write genome_id, read_count, proportion next to output for benchmarking. |
 | Extra viral FASTA | Merge user viral sequences with RefSeq viral. |
 | Genome completeness | `--complete-only` in snapshot and download. |
 | Abundance model | Per-category or per-genome (e.g. exponential) weights. |

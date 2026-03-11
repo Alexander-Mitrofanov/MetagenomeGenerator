@@ -95,6 +95,41 @@ def _add_download_subparser(subparsers) -> None:
         action="store_true",
         help="When searching NCBI (no --accessions-file), restrict to complete genomes only (exclude WGS/draft). For reproducible runs use a snapshot created with snapshot --complete-only.",
     )
+    p.add_argument(
+        "--max-bacteria",
+        type=int,
+        default=None,
+        metavar="N",
+        help="When using --accessions-file: use at most N bacterial accessions (random sample). Omit to use all from the file.",
+    )
+    p.add_argument(
+        "--max-virus",
+        type=int,
+        default=None,
+        metavar="N",
+        help="When using --accessions-file: use at most N viral accessions (random sample). Omit to use all from the file.",
+    )
+    p.add_argument(
+        "--max-archaea",
+        type=int,
+        default=None,
+        metavar="N",
+        help="When using --accessions-file: use at most N archaeal accessions (random sample). Omit to use all.",
+    )
+    p.add_argument(
+        "--max-plasmid",
+        type=int,
+        default=None,
+        metavar="N",
+        help="When using --accessions-file: use at most N plasmid accessions (random sample). Omit to use all.",
+    )
+    p.add_argument(
+        "--sample-seed",
+        type=int,
+        default=None,
+        metavar="SEED",
+        help="When using --max-* with --accessions-file: random seed for sampling. Default: 42. Use same seed for reproducible subset.",
+    )
     p.set_defaults(func=_run_download)
 
 
@@ -283,6 +318,16 @@ def _add_chunk_subparser(subparsers) -> None:
         choices=["illumina"],
         metavar="MODEL",
         help="Apply platform-specific sequencing errors (e.g. illumina: position-dependent substitution, higher toward 3'). Use --seed for reproducibility.",
+    )
+    p.add_argument(
+        "--output-fastq",
+        action="store_true",
+        help="Write FASTQ instead of FASTA, with per-base Phred quality scores (Illumina-like position-dependent). Use --seed for reproducibility.",
+    )
+    p.add_argument(
+        "--write-abundance",
+        action="store_true",
+        help="Write a tab-separated abundance file (genome_id, read_count, proportion) next to the output for ground-truth benchmarking.",
     )
     p.set_defaults(func=_run_chunk)
 
@@ -498,6 +543,41 @@ def _add_pipeline_subparser(subparsers) -> None:
         help="When downloading (no --accessions-file), restrict to complete genomes only (exclude WGS/draft). Use snapshot --complete-only for reproducible complete-only runs.",
     )
     p.add_argument(
+        "--max-bacteria",
+        type=int,
+        default=None,
+        metavar="N",
+        help="When using --accessions-file: use at most N bacterial accessions (random sample). Omit to use all.",
+    )
+    p.add_argument(
+        "--max-virus",
+        type=int,
+        default=None,
+        metavar="N",
+        help="When using --accessions-file: use at most N viral accessions (random sample). Omit to use all.",
+    )
+    p.add_argument(
+        "--max-archaea",
+        type=int,
+        default=None,
+        metavar="N",
+        help="When using --accessions-file: use at most N archaeal accessions (random sample). Omit to use all.",
+    )
+    p.add_argument(
+        "--max-plasmid",
+        type=int,
+        default=None,
+        metavar="N",
+        help="When using --accessions-file: use at most N plasmid accessions (random sample). Omit to use all.",
+    )
+    p.add_argument(
+        "--sample-seed",
+        type=int,
+        default=None,
+        metavar="SEED",
+        help="When using --max-* with --accessions-file: random seed for sampling (default 42).",
+    )
+    p.add_argument(
         "--forbid-ambiguous",
         action="store_true",
         help="Discard chunks containing ambiguous bases (non-ACGT, e.g. N). By default, such chunks are kept.",
@@ -556,6 +636,16 @@ def _add_pipeline_subparser(subparsers) -> None:
         choices=["illumina"],
         metavar="MODEL",
         help="Apply platform-specific sequencing errors when chunking (e.g. illumina: position-dependent substitution). Use --seed for reproducibility.",
+    )
+    p.add_argument(
+        "--output-fastq",
+        action="store_true",
+        help="Write FASTQ instead of FASTA, with per-base Phred quality scores (Illumina-like position-dependent). Use --seed for reproducibility.",
+    )
+    p.add_argument(
+        "--write-abundance",
+        action="store_true",
+        help="Write a tab-separated abundance file (genome_id, read_count, proportion) next to the metagenome output for ground-truth benchmarking.",
     )
     p.set_defaults(func=_run_pipeline)
 
@@ -911,6 +1001,11 @@ def _add_benchmark_recipe_subparser(subparsers) -> None:
         default="metagenome.fasta",
         help="Metagenome FASTA filename inside each replicate's metagenome/ dir. Default: metagenome.fasta",
     )
+    p.add_argument(
+        "--output-fastq",
+        action="store_true",
+        help="Write FASTQ instead of FASTA per replicate, with per-base Phred qualities (Illumina-like). Use --seed for reproducibility.",
+    )
     p.set_defaults(func=_run_benchmark_recipe)
 
 
@@ -939,6 +1034,7 @@ def _run_benchmark_recipe(args) -> None:
         reads_per_organism=args.reads_per_organism,
         output_fasta_name=args.output,
         progress_callback=progress,
+        output_fastq=getattr(args, "output_fastq", False),
     )
     print(f"Done. Wrote {len(paths)} replicate metagenomes to {args.output_dir}")
     for p in paths:
@@ -971,6 +1067,11 @@ def _run_download(args) -> None:
         accessions_file=getattr(args, "accessions_file", None),
         save_accessions_to=getattr(args, "save_accessions", None),
         complete_only=getattr(args, "complete_only", False),
+        max_bacteria=getattr(args, "max_bacteria", None),
+        max_virus=getattr(args, "max_virus", None),
+        max_archaea=getattr(args, "max_archaea", None),
+        max_plasmid=getattr(args, "max_plasmid", None),
+        sample_seed=getattr(args, "sample_seed", None),
     )
 
 
@@ -1064,7 +1165,11 @@ def _run_chunk(args) -> None:
         viral_taxonomy_json=viral_tax_path,
         balance_viral_by_taxonomy=balance_viral,
         error_model=getattr(args, "error_model", None),
+        output_fastq=getattr(args, "output_fastq", False),
+        write_abundance=getattr(args, "write_abundance", False),
     )
+    if getattr(args, "output_fastq", False):
+        out_path = out_path if out_path.suffix.lower() == ".fastq" else out_path.with_suffix(".fastq")
     print(f"Wrote {count} sequences to {out_path}")
 
 
@@ -1142,6 +1247,11 @@ def _run_pipeline(args) -> None:
             accessions_file=getattr(args, "accessions_file", None),
             save_accessions_to=getattr(args, "save_accessions", None),
             complete_only=getattr(args, "complete_only", False),
+            max_bacteria=getattr(args, "max_bacteria", None),
+            max_virus=getattr(args, "max_virus", None),
+            max_archaea=getattr(args, "max_archaea", None),
+            max_plasmid=getattr(args, "max_plasmid", None),
+            sample_seed=getattr(args, "sample_seed", None),
         )
 
     metagenome_dir.mkdir(parents=True, exist_ok=True)
@@ -1245,7 +1355,10 @@ def _run_pipeline(args) -> None:
         viral_taxonomy_json=viral_tax_path,
         balance_viral_by_taxonomy=balance_viral,
         error_model=getattr(args, "error_model", None),
+        output_fastq=getattr(args, "output_fastq", False),
+        write_abundance=getattr(args, "write_abundance", False),
     )
+    output_fastq_flag = getattr(args, "output_fastq", False)
     if do_train_test_split:
         _count, records = result
         output_stem = Path(args.output).stem
@@ -1260,14 +1373,18 @@ def _run_pipeline(args) -> None:
             work_dir=metagenome_dir / ".train_test_sim_work",
             blast_batch_size=getattr(args, "train_test_blast_batch_size", 2000),
             blast_num_threads=getattr(args, "train_test_blast_threads", 4),
+            write_fastq=output_fastq_flag,
         )
-        train_path = metagenome_dir / f"{output_stem}_train.fasta"
-        test_path = metagenome_dir / f"{output_stem}_test.fasta"
+        ext = "fastq" if output_fastq_flag else "fasta"
+        train_path = metagenome_dir / f"{output_stem}_train.{ext}"
+        test_path = metagenome_dir / f"{output_stem}_test.{ext}"
         plog.info("Train-test split: train=%d -> %s, test=%d -> %s", n_train, train_path, n_test, test_path)
         print(f"Train-test split ({train_test_split}% train): wrote {n_train} to {train_path}, {n_test} to {test_path}")
         out_path = train_path
     else:
         count = result
+        if output_fastq_flag:
+            out_path = out_path if out_path.suffix.lower() == ".fastq" else out_path.with_suffix(".fastq")
         plog.info("Chunk step: wrote %d sequences to %s", count, out_path)
         print(f"Wrote {count} sequences to {out_path}")
 

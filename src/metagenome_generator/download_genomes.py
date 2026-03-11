@@ -13,6 +13,7 @@ to skip the search and download exactly those accessions on a later run.
 import argparse
 import json
 import logging
+import random
 import time
 from pathlib import Path
 
@@ -213,6 +214,11 @@ def download_genomes(
     accessions_file: Path | None = None,
     save_accessions_to: Path | None = None,
     complete_only: bool = False,
+    max_bacteria: int | None = None,
+    max_virus: int | None = None,
+    max_archaea: int | None = None,
+    max_plasmid: int | None = None,
+    sample_seed: int | None = None,
 ) -> None:
     """Download bacterial and viral genomes (and optionally archaea, plasmid) into `output_dir`.
 
@@ -221,7 +227,9 @@ def download_genomes(
     samples (bacteria, archaea, plasmid) support training classifiers to distinguish viruses.
 
     If accessions_file is set, load accession IDs from that JSON (and optional timestamp)
-    instead of searching NCBI, so the run is reproducible. If save_accessions_to is set,
+    instead of searching NCBI, so the run is reproducible. Optionally limit how many to
+    use per category with max_bacteria, max_virus, max_archaea, max_plasmid (sample from
+    the file with sample_seed for reproducibility). If save_accessions_to is set,
     write the accession list and current UTC timestamp to that file after searching.
     When not using accessions_file, complete_only=True restricts NCBI search to complete
     genomes only (excludes WGS/draft via complete[Properties] and NOT WGS[Properties]).
@@ -232,6 +240,9 @@ def download_genomes(
         raise ValueError("num_bacteria must be >= 0")
     if num_virus < 0:
         raise ValueError("num_virus must be >= 0")
+    for name, val in [("max_bacteria", max_bacteria), ("max_virus", max_virus), ("max_archaea", max_archaea), ("max_plasmid", max_plasmid)]:
+        if val is not None and val < 0:
+            raise ValueError(f"{name} must be >= 0 when set")
     output_dir.mkdir(parents=True, exist_ok=True)
     bacteria_dir = output_dir / BACTERIA_DIR
     virus_dir = output_dir / VIRUS_DIR
@@ -244,6 +255,20 @@ def download_genomes(
         ts = data.get(ACCESSIONS_KEY_TIMESTAMP, "unknown")
         print(f"Using accessions from {accessions_file} (timestamp: {ts})")
         print(f"  Bacterial: {len(bacterial_ids)}, viral: {len(viral_ids)}, archaea: {len(archaea_ids)}, plasmid: {len(plasmid_ids)}")
+
+        def _sample(lst: list[str], max_n: int | None, seed: int | None) -> list[str]:
+            if max_n is None or len(lst) <= max_n:
+                return lst
+            rng = random.Random(seed)
+            return list(rng.sample(lst, max_n))
+
+        if max_bacteria is not None or max_virus is not None or max_archaea is not None or max_plasmid is not None:
+            seed = sample_seed if sample_seed is not None else 42
+            bacterial_ids = _sample(bacterial_ids, max_bacteria, seed)
+            viral_ids = _sample(viral_ids, max_virus, seed)
+            archaea_ids = _sample(archaea_ids, max_archaea, seed)
+            plasmid_ids = _sample(plasmid_ids, max_plasmid, seed)
+            print(f"  Sampled (seed={seed}): bacterial={len(bacterial_ids)}, viral={len(viral_ids)}, archaea={len(archaea_ids)}, plasmid={len(plasmid_ids)}")
     else:
         queries = get_queries(complete_only=complete_only)
         if complete_only:
@@ -343,6 +368,41 @@ def _cli(argv: list[str] | None = None) -> None:
         metavar="PATH",
         help="After searching NCBI, save accession list and UTC timestamp to this JSON for reproducible runs (use with --accessions-file later).",
     )
+    parser.add_argument(
+        "--max-bacteria",
+        type=int,
+        default=None,
+        metavar="N",
+        help="When using --accessions-file: use at most N bacterial accessions (random sample). Omit to use all.",
+    )
+    parser.add_argument(
+        "--max-virus",
+        type=int,
+        default=None,
+        metavar="N",
+        help="When using --accessions-file: use at most N viral accessions (random sample). Omit to use all.",
+    )
+    parser.add_argument(
+        "--max-archaea",
+        type=int,
+        default=None,
+        metavar="N",
+        help="When using --accessions-file: use at most N archaeal accessions (random sample). Omit to use all.",
+    )
+    parser.add_argument(
+        "--max-plasmid",
+        type=int,
+        default=None,
+        metavar="N",
+        help="When using --accessions-file: use at most N plasmid accessions (random sample). Omit to use all.",
+    )
+    parser.add_argument(
+        "--sample-seed",
+        type=int,
+        default=None,
+        metavar="SEED",
+        help="When using --max-* with --accessions-file: random seed for sampling (default 42).",
+    )
     args = parser.parse_args(argv)
 
     if args.accessions_file is not None and not args.accessions_file.exists():
@@ -356,6 +416,11 @@ def _cli(argv: list[str] | None = None) -> None:
         num_plasmid=args.num_plasmid,
         accessions_file=args.accessions_file,
         save_accessions_to=args.save_accessions,
+        max_bacteria=getattr(args, "max_bacteria", None),
+        max_virus=getattr(args, "max_virus", None),
+        max_archaea=getattr(args, "max_archaea", None),
+        max_plasmid=getattr(args, "max_plasmid", None),
+        sample_seed=getattr(args, "sample_seed", None),
     )
 
 
