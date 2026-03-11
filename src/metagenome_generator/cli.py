@@ -13,7 +13,7 @@ from .accession_snapshot import get_default_snapshot_path, migrate_snapshot_to_c
 from .download_genomes import download_genomes
 from .chunk_genomes import build_metagenome, get_file_stats, split_train_test_and_write
 from .seeker_wrapper import SEEKER_MIN_LENGTH, run_seeker
-from .blastn_filter import load_eve_intervals, run_blastn_from_dirs
+from .blastn_filter import export_eve_regions_fasta, load_eve_intervals, run_blastn_from_dirs
 from .genome_layout import validate_genome_dir
 from .temporal_split import run_temporal_split, run_temporal_split_info
 
@@ -345,6 +345,20 @@ def _add_pipeline_subparser(subparsers) -> None:
         help="BLASTN percent identity threshold. Default: 70",
     )
     p.add_argument(
+        "--blastn-export-eve-fasta",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Optional FASTA output path to write EVE/provirus intervals as sequences (one record per interval).",
+    )
+    p.add_argument(
+        "--blastn-export-eve-min-length",
+        type=int,
+        default=200,
+        metavar="N",
+        help="Minimum interval length to export with --blastn-export-eve-fasta. Default: 200",
+    )
+    p.add_argument(
         "--filter-similar",
         action="store_true",
         help="Filter chunks by similarity: drop sequences >=90%% similar to already-kept; oversample and refill to target.",
@@ -463,6 +477,20 @@ def _add_blastn_filter_subparser(subparsers) -> None:
         type=float,
         default=70.0,
         help="BLASTN percent identity. Default: 70",
+    )
+    p.add_argument(
+        "--export-eve-fasta",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Optional FASTA output path to write EVE/provirus intervals as sequences (one record per interval).",
+    )
+    p.add_argument(
+        "--export-eve-min-length",
+        type=int,
+        default=200,
+        metavar="N",
+        help="Minimum interval length to export with --export-eve-fasta. Default: 200",
     )
     p.set_defaults(func=_run_blastn_filter)
 
@@ -685,12 +713,22 @@ def _run_blastn_filter(args) -> None:
     if not ok:
         print(f"Error: {err}", file=__import__("sys").stderr)
         raise SystemExit(1)
-    run_blastn_from_dirs(
+    eve_intervals = run_blastn_from_dirs(
         args.genome_dir,
         args.out_dir,
         evalue=args.evalue,
         perc_identity=args.perc_identity,
     )
+    export_path = getattr(args, "export_eve_fasta", None)
+    if export_path is not None:
+        from .genome_layout import get_nonviral_fasta_paths
+        nonviral = get_nonviral_fasta_paths(args.genome_dir)
+        export_eve_regions_fasta(
+            nonviral,
+            eve_intervals,
+            export_path,
+            min_interval_length=getattr(args, "export_eve_min_length", 200),
+        )
 
 
 def _run_pipeline(args) -> None:
@@ -745,14 +783,22 @@ def _run_pipeline(args) -> None:
                   getattr(args, "blastn_evalue", 1e-5), getattr(args, "blastn_perc_identity", 70.0))
         blastn_out = getattr(args, "blastn_out_dir", None) or blastn_dir
         blastn_out.mkdir(parents=True, exist_ok=True)
-        run_blastn_from_dirs(
+        eve_intervals = run_blastn_from_dirs(
             download_dir,
             blastn_out,
             evalue=getattr(args, "blastn_evalue", 1e-5),
             perc_identity=getattr(args, "blastn_perc_identity", 70.0),
         )
-        eve_json = blastn_out / "eve_intervals.json"
-        eve_intervals = load_eve_intervals(eve_json)
+        export_path = getattr(args, "blastn_export_eve_fasta", None)
+        if export_path is not None:
+            from .genome_layout import get_nonviral_fasta_paths
+            nonviral = get_nonviral_fasta_paths(download_dir)
+            export_eve_regions_fasta(
+                nonviral,
+                eve_intervals,
+                export_path,
+                min_interval_length=getattr(args, "blastn_export_eve_min_length", 200),
+            )
         plog.info("BLASTN filter: eve_intervals loaded for %d sequences", len(eve_intervals))
         print(f"EVE intervals loaded for chunk step ({len(eve_intervals)} sequences).")
     else:

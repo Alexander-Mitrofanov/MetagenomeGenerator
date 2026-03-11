@@ -191,6 +191,65 @@ def load_eve_intervals(eve_json: Path) -> dict[tuple[str, str], list[tuple[int, 
     return {tuple(k.split("\t")): [tuple(iv) for iv in v] for k, v in data.items()}
 
 
+def export_eve_regions_fasta(
+    nonviral_fasta_paths: list[Path],
+    eve_intervals: dict[tuple[str, str], list[tuple[int, int]]],
+    out_fasta: Path,
+    *,
+    min_interval_length: int = 1,
+) -> int:
+    """Export EVE/provirus intervals as FASTA.
+
+    Writes one FASTA record per interval with header:
+      <file_stem>|<qseqid>|<start1>-<end1>
+
+    where coordinates are 1-based inclusive on the original query sequence.
+    """
+    from Bio import SeqIO
+    from Bio.Seq import Seq
+    from Bio.SeqRecord import SeqRecord
+
+    if min_interval_length < 1:
+        raise ValueError("min_interval_length must be >= 1")
+
+    out_fasta.parent.mkdir(parents=True, exist_ok=True)
+
+    n_written = 0
+    with out_fasta.open("w") as out_handle:
+        for fp in nonviral_fasta_paths:
+            by_qseqid: dict[str, list[tuple[int, int]]] = {}
+            for (stem, qseqid), intervals in eve_intervals.items():
+                if stem != fp.stem:
+                    continue
+                if intervals:
+                    by_qseqid[qseqid] = intervals
+            if not by_qseqid:
+                continue
+
+            for rec in SeqIO.parse(fp, "fasta"):
+                qseqid = rec.id
+                intervals = by_qseqid.get(qseqid)
+                if not intervals:
+                    continue
+                seq_str = str(rec.seq)
+                for (start0, end0) in intervals:
+                    if end0 <= start0:
+                        continue
+                    if (end0 - start0) < min_interval_length:
+                        continue
+                    sub = seq_str[start0:end0]
+                    start1 = start0 + 1
+                    end1 = end0
+                    rid = f"{fp.stem}|{qseqid}|{start1}-{end1}"
+                    out_rec = SeqRecord(Seq(sub), id=rid, description="")
+                    SeqIO.write(out_rec, out_handle, "fasta")
+                    n_written += 1
+
+    logger.info("BLASTN filter: exported %d EVE intervals to %s", n_written, out_fasta)
+    print(f"Exported EVE intervals FASTA: {out_fasta} ({n_written} intervals)")
+    return n_written
+
+
 def chunk_overlaps_eve(chunk_start: int, chunk_end: int, eve_intervals: list[tuple[int, int]]) -> bool:
     """True if [chunk_start, chunk_end) overlaps any EVE interval (0-based half-open)."""
     for s, e in eve_intervals:

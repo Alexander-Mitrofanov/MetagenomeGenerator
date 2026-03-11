@@ -28,7 +28,7 @@ Metagenome Generator produces FASTA training data for viral vs. prokaryotic (or 
 | **Single metagenome FASTA** | One output file with reads from all categories, suitable for training or benchmarking. |
 | **Reproducible datasets** | Snapshot full accession lists (with optional CreateDate/title); re-download or re-chunk the same set anytime. |
 | **Temporal train/test split** | Split by NCBI CreateDate (e.g. train on pre-2019, test on 2019+); evaluate generalization to “novel” sequences. |
-| **EVE removal** | BLAST non-viral vs viral; exclude chunks overlapping endogenous viral elements to reduce false viral signal in negatives. |
+| **EVE removal / export** | BLAST non-viral vs viral; exclude chunks overlapping endogenous viral elements and optionally export provirus/EVE intervals as a separate FASTA. |
 | **Similarity filtering** | Drop reads ≥90% similar to already-kept; optional train/test split with test sequences removed if similar to train. |
 | **Mutation simulation** | Per-base substitution and optional indel rates; test classifier robustness to sequencing error or divergence (e.g. 1% substitutions). |
 | **Extra viral FASTA** | Merge user-provided viral sequences (e.g. metavirome contigs) with RefSeq viral chunks in one run. |
@@ -240,12 +240,17 @@ Then run `download` or `pipeline` with `--accessions-file train_<basename>.json`
 **Standalone:**
 
 ```bash
-metagenome-generator blastn-filter --genome-dir output/downloaded --out-dir output/blastn --evalue 1e-5 --perc-identity 70
+metagenome-generator blastn-filter --genome-dir output/downloaded --out-dir output/blastn --evalue 1e-5 --perc-identity 70 \
+  --export-eve-fasta output/blastn/eve_intervals.fasta --export-eve-min-length 200
 metagenome-generator chunk --input output/downloaded --output metagenome.fasta --output-dir output/metagenome \
   --balanced --eve-intervals output/blastn/eve_intervals.json
 ```
 
-**In pipeline:** add `--run-blastn-filter` (and optionally `--blastn-evalue`, `--blastn-perc-identity`). Requires BLAST+.
+**In pipeline:** add `--run-blastn-filter` and optionally:
+- `--blastn-evalue`, `--blastn-perc-identity`
+- `--blastn-export-eve-fasta PATH` (with `--blastn-export-eve-min-length N`)
+
+Requires BLAST+.
 
 ---
 
@@ -272,7 +277,7 @@ Or add `--run-seeker` to the pipeline.
 | `temporal-split-info` | Show train/test counts for a split date (no files written). |
 | `temporal-split` | Write train and test accession JSONs by CreateDate. |
 | `migrate-snapshot` | Convert legacy snapshot to per-category metadata format. |
-| `blastn-filter` | BLAST non-viral vs viral; write EVE intervals for chunk. |
+| `blastn-filter` | BLAST non-viral vs viral; write EVE intervals for chunk and optional provirus/EVE FASTA. |
 | `seeker` | Run Seeker on a metagenome FASTA. |
 
 Full options: `metagenome-generator <command> --help`.
