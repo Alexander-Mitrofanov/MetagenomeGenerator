@@ -1,6 +1,8 @@
-# Metagenome Generator
+# Arc MAGE
 
-**Simulated metagenome FASTA datasets from NCBI RefSeq for training and evaluating sequence classifiers (e.g. viral vs. prokaryotic, phage vs. bacteria).**
+![Arc MAGE](logo.png)
+
+**Arc MAGE** — *Automated Reproducible Curation · Metagenome Augmented Generation Engine* — builds simulated metagenome FASTA datasets from NCBI RefSeq (or your own genomes) for training and evaluating sequence classifiers (e.g. viral vs. prokaryotic, phage vs. bacteria). **Arc** = automated, reproducible curation (snapshots, seeds, train/test); **MAGE** = metagenome augmented generation engine (distinct from other tools using “MAGE”, e.g. Meta-Analysis of Gene Expression).
 
 ---
 
@@ -21,8 +23,9 @@
 
 ## What it does
 
-Metagenome Generator downloads bacterial, viral, archaeal, and plasmid genomes from NCBI, splits them into fixed- or variable-length reads, and writes a single metagenome FASTA. It supports:
+Arc MAGE downloads bacterial, viral, archaeal, and plasmid genomes from NCBI (or uses **your own FASTA files** in the same folder layout), splits them into fixed- or variable-length reads, and writes a single metagenome FASTA. It supports:
 
+- **In-house datasets** — place your genome FASTAs in `bacteria/`, `virus/`, `archaea/`, `plasmid/` and run `chunk`; no download required.
 - **Reproducible runs** — snapshot accession lists to JSON and re-download or re-chunk the same set anytime.
 - **Rigorous train/test evaluation** — temporal split by NCBI submission date, or percentage split with BLAST-based similarity filtering so test reads similar to train are removed.
 - **EVE handling** — BLAST non-viral vs viral to exclude (and optionally export) endogenous viral element regions.
@@ -47,6 +50,7 @@ Metagenome Generator downloads bacterial, viral, archaeal, and plasmid genomes f
 | Use case | Objective | Command or flow |
 |----------|-----------|------------------|
 | **Single metagenome** | Generate one synthetic metagenome FASTA (fixed or variable read length) for classifier training or method benchmarking, with controlled genome counts and read parameters. | `pipeline --num-bacteria N --num-virus N --output-dir out --output metagenome.fasta --sequence-length 250 --reads-per-organism 1000` |
+| **In-house genome set** | Use your own genome FASTA files (isolates, assemblies, phages) instead of NCBI: place them in `bacteria/`, `virus/`, etc., then run `chunk` with `--input` pointing to that directory. | Create folder layout → put FASTAs in the right category folders → `chunk --input my_genomes --output metagenome.fasta --output-dir out --sequence-length 250 --reads-per-organism 1000` |
 | **Reproducible genome set** | Fix the set of genomes used across runs and machines: record the catalog once with `snapshot`, then download and chunk from that list so that results depend only on the snapshot and seeds, not on NCBI’s current state. Optionally limit to a subset with `--max-bacteria`, `--max-virus`, and `--sample-seed`. | `snapshot` → save JSON; then `download --accessions-file <json>` (and chunk) or use that file in `pipeline`. To use a subset: add `--max-bacteria N --max-virus M --sample-seed 42`. |
 | **Temporal train/test** | Evaluate generalization to “future” genomes: train on accessions submitted before a cutoff date and test on accessions on or after that date, with BLAST-based removal of test reads that are highly similar to train (avoids inflated metrics from near-identical strains). | `temporal-split-info` → `temporal-split` → build train and test metagenomes from the two JSONs → **`filter-test-against-train`** to drop test reads similar to train. |
 | **Single-dataset train/test** | Split one synthetic metagenome into train and test fractions (e.g. 80/20) with automatic removal of test reads that are ≥ threshold similar to train, for quick evaluation without temporal split. | `chunk` or `pipeline` with `--train-test-split 80` (similarity filter applied automatically). |
@@ -169,9 +173,43 @@ metagenome-generator download \
 
 ---
 
+### Using your own (in-house) genome set
+
+You can skip the download step and use **your own genome FASTA files**. Use the same folder layout the tool expects:
+
+| Folder       | Contents |
+|-------------|----------|
+| `bacteria/` | One or more FASTA files (e.g. your bacterial isolates or assemblies). |
+| `virus/`    | One or more FASTA files (e.g. your viral sequences or phages). |
+| `archaea/`  | Optional. FASTA files for archaeal genomes. |
+| `plasmid/`  | Optional. FASTA files for plasmid sequences. |
+
+**Requirements:** At least one file in **`virus/`** and at least one file in **one of** `bacteria/`, `archaea/`, or `plasmid/` (so that both viral and non-viral categories are present). Empty folders are ignored.
+
+**File naming:** Use any filename (e.g. `isolate_001.fasta`, `NC_12345.fasta`). The **file stem** (filename without `.fasta`) becomes the genome identifier in the output (e.g. `isolate_001_read_0` with description `start=0 end=250`). Multi-record FASTA files are supported: all records in a file share the same prefix.
+
+**Workflow:** Create the directory, place your FASTA files in the correct category folders, then run **`chunk`** with `--input` pointing to that directory. You do **not** need to run `download`.
+
+```bash
+# Example: in-house data in my_genomes/
+# my_genomes/bacteria/isolate_A.fasta  my_genomes/bacteria/isolate_B.fasta
+# my_genomes/virus/phage_1.fasta
+
+metagenome-generator chunk \
+  --input my_genomes \
+  --output metagenome.fasta \
+  --output-dir output/metagenome \
+  --sequence-length 250 \
+  --reads-per-organism 1000
+```
+
+You can also **mix** NCBI-downloaded and in-house data: run `download` into a directory, then copy or symlink your own FASTA files into the same `bacteria/`, `virus/`, etc. folders before running `chunk`.
+
+---
+
 ### Chunk genomes into reads
 
-Turn genome FASTAs into one metagenome FASTA. Input is typically the download directory (`bacteria/`, `virus/`, `archaea/`, `plasmid/`).
+Turn genome FASTAs into one metagenome FASTA. Input is either the **download** output directory or **your own directory** with the same layout (`bacteria/`, `virus/`, `archaea/`, `plasmid/`). See [Using your own (in-house) genome set](#using-your-own-in-house-genome-set) above.
 
 ```bash
 metagenome-generator chunk \
