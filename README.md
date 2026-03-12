@@ -9,7 +9,6 @@ MERGE generates synthetic metagenome datasets (FASTA or FASTQ) for training and 
 ## Table of contents
 
 - [What it does](#what-it-does)
-- [When to use it](#when-to-use-it)
 - [Use cases at a glance](#use-cases-at-a-glance)
 - [Installation](#installation)
 - [Requirements](#requirements)
@@ -23,23 +22,19 @@ MERGE generates synthetic metagenome datasets (FASTA or FASTQ) for training and 
 
 ## What it does
 
-MERGE downloads bacterial, viral, archaeal, and plasmid genomes from NCBI (or uses **your own FASTA files** in the same folder layout), splits them into fixed- or variable-length reads, and writes a single metagenome FASTA. It supports:
+MERGE downloads bacterial, viral, archaeal, and plasmid genomes from NCBI (or uses your own FASTA files in the same folder layout), splits them into fixed- or variable-length reads, and writes a single metagenome FASTA or FASTQ. Use it when you need synthetic training or evaluation data for sequence classifiers (e.g. viral vs. prokaryotic, phage vs. bacteria). It supports:
 
-- **In-house datasets** — place your genome FASTAs in `bacteria/`, `virus/`, `archaea/`, `plasmid/` and run `chunk`; no download required.
-- **Reproducible runs** — snapshot accession lists to JSON and re-download or re-chunk the same set anytime.
-- **Rigorous train/test evaluation** — temporal split by NCBI submission date, or percentage split with BLAST-based similarity filtering so test reads similar to train are removed.
-- **EVE handling** — BLAST non-viral vs viral to exclude (and optionally export) endogenous viral element regions.
-- **Structured benchmark recipe** — fixed N genomes per category (e.g. 50 viral, 50 bacterial), optional replicates; one command, reproducible and comparable to published protocols.
-- **Extra options** — mutation simulation, user-provided viral FASTA, genome completeness filter, abundance models, taxonomy-aware viral balancing.
+- **Reproducible runs.** Snapshot accession lists to a date-stamped JSON and re-download or re-chunk the same genome set anytime. Use this when you need identical inputs across runs, machines, or months—e.g. for paper reproducibility, benchmarks, or comparing methods on a frozen catalog. Optionally cap how many genomes to use per category (`--max-bacteria`, `--max-virus`, etc.) with a fixed seed so subset selection is reproducible too.
 
----
+- **Rigorous train/test evaluation.** Split by NCBI submission date (temporal: train on “past”, test on “future” accessions) or by a percentage of reads (random split). In both cases, MERGE can remove from the test set any reads that are highly similar to the training set (BLAST-based identity and coverage threshold), so you avoid inflated metrics from near-identical strains. Use this when you care about generalization and want to avoid data leakage.
 
-## When to use it
+- **EVE handling.** BLAST non-viral genomes (bacteria, archaea, plasmid) against a viral database to find endogenous viral elements (EVEs); exclude those regions when generating reads, and optionally export them as a separate FASTA. Use this when you need non-viral genomes that are not contaminated by viral-looking regions that would confound viral vs. non-viral classifiers.
 
-- You need **synthetic training data** for viral/prokaryotic or phage/bacteria classifiers.
-- You want **reproducible** train/test sets (fixed accession lists, optional temporal split).
-- You want to **avoid data leakage**: remove test reads that are highly similar to train (e.g. different strains).
-- You need **EVE-aware** non-viral genomes (exclude or export provirus regions).
+- **Structured benchmark recipe.** Generate multiple replicate datasets with a fixed number of genomes per category (e.g. 50 bacterial, 50 viral per replicate) from a snapshot, in one command. Use this when you want standardized, comparable synthetic datasets for method comparison or for reporting metrics as mean ± std across replicates.
+
+- **Extra options.** Add mutation simulation (substitutions, indels), merge in user-provided viral FASTA (e.g. metavirome contigs), restrict to complete genomes only, apply per-category or per-genome abundance models, and balance viral reads by taxonomy group. Use these when you need realistic noise, custom viral sets, or controlled community composition.
+
+- **In-house datasets.** Place your own genome FASTAs in `bacteria/`, `virus/`, `archaea/`, and/or `plasmid/` and run `chunk` with `--input` pointing to that directory; no NCBI download required. Use this when you have isolates, assemblies, or phages of your own and want to build a synthetic metagenome from them.
 
 ---
 
