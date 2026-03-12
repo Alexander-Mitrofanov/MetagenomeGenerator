@@ -9,6 +9,7 @@ MERGE generates synthetic metagenome datasets (FASTA or FASTQ) for training and 
 ## Table of contents
 
 - [What it does](#what-it-does)
+- [Accession snapshot](#accession-snapshot)
 - [Use cases at a glance](#use-cases-at-a-glance)
 - [Installation](#installation)
 - [Requirements](#requirements)
@@ -38,9 +39,29 @@ MERGE downloads bacterial, viral, archaeal, and plasmid genomes from NCBI (or us
 
 ---
 
+## Accession snapshot
+
+NCBI's RefSeq catalog changes over time (new submissions, retractions, taxonomy updates). If you search and download "N bacterial and N viral genomes" on different dates, you get different accession sets, so experiments are not reproducible. The **snapshot** command records the **current catalog** of matching accessions to a date-stamped JSON **without downloading any sequences**. That JSON is a frozen accession list: later, `download --accessions-file <json>` (or `pipeline` with the same file) fetches exactly those accessions, so the same snapshot always yields the same genome set. **Snapshot = reproducible genome selection**; **download with accessions-file = same genomes every time.**
+
+**Creating a snapshot:**
+
+```bash
+metagenome-generator snapshot --output snapshots/accession_snapshot_2026-03-10.json
+```
+
+The command queries NCBI for all RefSeq accessions that match the chosen categories and writes them to the JSON. **It can take a long time** (tens of minutes to over an hour, depending on catalog size and rate limits), but it is **usually needed only once**—or when you want to refresh the catalog. Re-run when you need an updated list (e.g. for a new project); for the same project or paper, reuse the same snapshot file.
+
+**Snapshot contents.** The JSON contains four category lists: **bacterial**, **viral**, **archaeal**, and **plasmid**. Each list holds accession IDs (e.g. `NC_000001.1`). By default, each accession also has **create_date** (NCBI submission date, for temporal train/test splits) and **title** (genome description, for auditing). Use `--no-metadata` to store only the ID lists. Use `--complete-only` to restrict the catalog to complete genomes only; then use that snapshot with `--accessions-file` for reproducible complete-only runs.
+
+**Using a snapshot.** Pass the JSON to `download` or `pipeline` via `--accessions-file <path>`. To download only a subset (snapshots can contain tens or hundreds of thousands of IDs), use **`--max-bacteria N --max-virus M`** (and optionally `--max-archaea`, `--max-plasmid`) with **`--sample-seed`** so the subset is reproducible.
+
+**Replicating past experiments.** To reproduce results from a paper or an earlier run, use the **same snapshot file** that was used then. Keep old snapshots (e.g. `accession_snapshot_2025-01-15.json`) in version control or an archive; with that file and the same seeds, you can regenerate the same genome set and metagenome.
+
+---
+
 ## Use cases at a glance
 
-**Accession snapshot and why it exists.** NCBI’s RefSeq catalog changes over time (new submissions, retractions, taxonomy updates). If you search and download “N bacterial and N viral genomes” on different dates, you get different accession sets, so experiments are not reproducible. The **snapshot** command records the **current catalog** of matching accessions (bacterial, viral, archaeal, plasmid) to a date-stamped JSON **without downloading sequences**. That JSON is a frozen accession list: later, `download --accessions-file <json>` (or `pipeline` with the same file) fetches exactly those accessions, so the same snapshot always yields the same genome set. Snapshots can be large (tens or hundreds of thousands of IDs); use **`--max-bacteria N --max-virus M`** (and **`--sample-seed`**) with `--accessions-file` to download a reproducible random subset. Summary: **snapshot = reproducible genome selection**; **download with accessions-file = same genomes every time**.
+(For snapshot-based flows, see [Accession snapshot](#accession-snapshot) above.)
 
 | Use case | Objective | Command or flow |
 |----------|-----------|------------------|
