@@ -136,7 +136,7 @@ Sections below describe each feature and how to use it.
 
 ### Download genomes
 
-Obtain RefSeq genomes by category (bacteria, virus, archaea, plasmid) from NCBI Nucleotide. You specify **how many bacterial** and **how many viral** genomes separately; optionally add archaea and plasmid as extra negative samples. Output is written to category subfolders: `bacteria/`, `virus/`, `archaea/`, `plasmid/` under the output directory.
+Obtain RefSeq genomes by category (bacteria, virus, archaea, plasmid) from NCBI Nucleotide. You specify **how many bacteria** and **how many virus** genomes separately; optionally add archaea and plasmid as extra negative samples. Each genome is saved as **`{accession}.fasta`** (e.g. `NC_000001.1.fasta`) in the corresponding category folder. Output layout: `bacteria/`, `virus/`, `archaea/`, `plasmid/` under the output directory.
 
 ```bash
 metagenome-generator download --num-bacteria 10 --num-virus 10 --output-dir output
@@ -154,9 +154,9 @@ metagenome-generator download \
 
 | Option | Use |
 |--------|-----|
-| `--num-bacteria` | **Number of bacterial genomes.** How many RefSeq bacterial genomes to fetch. Use for negative (non-viral) samples in viral vs. prokaryotic classifiers. Set to 0 only when using `--accessions-file` with a snapshot that has no bacterial list. |
-| `--num-virus` | **Number of viral genomes.** How many RefSeq viral genomes to fetch. Use for positive (viral) samples. Set to 0 only when using `--accessions-file` with a snapshot that has no viral list. |
-| `--num-archaea` | **Number of archaeal genomes.** Optional; default 0. Archaea are additional negative samples (non-viral). Use to broaden the diversity of non-viral sequences (e.g. for phage vs. bacteria + archaea). |
+| `--num-bacteria` | **Number of bacteria genomes.** How many RefSeq bacterial genomes to fetch. Use for negative (non-viral) samples in viral vs. prokaryotic classifiers. Set to 0 only when using `--accessions-file` with a snapshot that has no bacteria list. |
+| `--num-virus` | **Number of virus genomes.** How many RefSeq viral genomes to fetch. Use for positive (viral) samples. Set to 0 only when using `--accessions-file` with a snapshot that has no virus list. |
+| `--num-archaea` | **Number of archaea genomes.** Optional; default 0. Archaea are additional negative samples (non-viral). Use to broaden the diversity of non-viral sequences (e.g. for phage vs. bacteria + archaea). |
 | `--num-plasmid` | **Number of plasmid sequences.** Optional; default 0. Plasmids are additional negative samples. Use when you want to avoid classifying plasmid-derived reads as viral. |
 | `--output-dir` | **Output directory.** All category folders (`bacteria/`, `virus/`, etc.) are created under this path. Use a dedicated directory (e.g. `working_directory/downloaded/`) to keep runs organized. |
 | `--accessions-file` | **Reproducible run.** Path to a JSON file containing accession IDs (e.g. from `snapshot` or a previous `--save-accessions` run). NCBI search is skipped; by default **all** accessions in the file are downloaded. Use when you need the same genome set on every run (e.g. for benchmarks or paper reproducibility). |
@@ -184,24 +184,26 @@ metagenome-generator chunk \
 
 | Option | Use |
 |--------|-----|
-| `--sequence-length` | **Fixed read length (nt).** Each chunk is exactly this many nucleotides. Typical values: 250–500 for short-read style; match your classifier’s expected input (e.g. 250 for some viral classifiers). Required unless you use variable-length mode. |
+| `--sequence-length` | **Fixed read length (nt).** Each simulated read is exactly this many nucleotides. Typical values: 250–500 for short-read style; match your classifier’s expected input (e.g. 250 for some viral classifiers). Required unless you use variable-length mode. |
 | `--reads-per-organism` | **Max reads per genome.** Upper limit on how many non-overlapping (or sampled) reads are taken from each genome file. Omit to use all possible reads from every genome (can produce very large outputs). Use a fixed value (e.g. 1000) for controlled dataset size and balance across genomes when combined with other options. |
 | `--balanced` | **Same number of reads per genome.** Each genome contributes the same count of reads (the minimum across all genomes). Use when you want to avoid one category (e.g. bacteria) dominating simply because genomes are longer; good for training classifiers with even representation per genome. |
 | `--cap-total-reads` | **Cap total reads.** Downsample the whole metagenome to at most N reads. Use to match a target size (e.g. cap to the size of your positive set) or to keep evaluation sets manageable. Applied after per-genome limits and balancing. |
 | `--min-contig-length`, `--max-contig-length` | **Variable-length contigs.** Instead of fixed-length reads, sample contigs with lengths uniformly between these two values (nt). Use for long-read or contig-level benchmarks (e.g. 300–2000 bp). Omit both to use fixed `--sequence-length`. |
 | `--seed` | **Random seed.** Fixes randomness for variable-length sampling, cap, mutation, and train/test split. Use the same seed to reproduce the exact same metagenome; change the seed to get a different sample. |
-| `--eve-intervals` | **EVE exclusion.** Path to `eve_intervals.json` produced by `blastn-filter`. Chunks that overlap these endogenous viral element (EVE) intervals on non-viral genomes are excluded from the metagenome. Use to avoid bacterial/archaeal regions that look viral and would confound viral vs. non-viral classifiers. |
+| `--eve-intervals` | **EVE exclusion.** Path to `eve_intervals.json` produced by `blastn-filter`. Reads/contigs that overlap these endogenous viral element (EVE) intervals on non-viral genomes are excluded from the metagenome. Use to avoid bacterial/archaeal regions that look viral and would confound viral vs. non-viral classifiers. |
 | `--forbid-ambiguous` | **Exclude ambiguous bases.** Discard any read that contains non-ACGT characters (e.g. N, R, Y). Use when your pipeline or classifier assumes strict ACGT-only sequence, or to simulate cleaner sequencing. |
 | `--substitution-rate`, `--indel-rate` | **Mutation simulation.** Introduce substitutions and/or indels at the given per-base rate (0–1). Use to test classifier robustness to sequencing error or divergence (e.g. 0.01 for 1% substitution rate). Combine with `--seed` for reproducible mutated datasets. |
 | `--error-model` | **Platform-specific sequencing errors.** Set to `illumina` to apply position-dependent substitution (low at 5′, higher toward 3′, mimicking Illumina quality drop). Use for realistic benchmarking when training or evaluating on short-read data. Use `--seed` for reproducibility. |
 | `--output-fastq` | **FASTQ output with quality scores.** Write **FASTQ** (single-end) instead of FASTA, with per-base Phred quality scores (Illumina-like position-dependent). Automatically enables Illumina-like errors so qualities match the sequence. Use when downstream tools expect FASTQ (e.g. aligners, variant callers). Use `--seed` for reproducibility. |
 | `--write-abundance` | **Ground-truth abundance file.** Write a tab-separated file `{output_stem}_abundance.txt` next to the metagenome (columns: genome_id, read_count, proportion). Use for benchmarking abundance estimators or when you need to know how many reads came from each genome. |
 | `--extra-viral-fasta` | **Merge user viral sequences.** Path to a FASTA of additional viral sequences (e.g. metavirome contigs, custom viral set). They are chunked like RefSeq viral genomes and merged into the viral pool. Use to combine public RefSeq viral data with your own viral contigs in one metagenome. |
-| `--abundance-profile` | **Per-category read weights.** Comma-separated `category=weight`, e.g. `bacterial=0.5,viral=2,archaea=1,plasmid=1`. Scales how many reads are taken from each category relative to the base limit. Use to simulate uneven community composition (e.g. more viral, less bacterial) without changing genome lists. |
+| `--abundance-profile` | **Per-category read weights.** Comma-separated `category=weight`, e.g. `bacteria=0.5,virus=2,archaea=1,plasmid=1`. Scales how many reads are taken from each category relative to the base limit. Use to simulate uneven community composition (e.g. more virus, less bacteria) without changing genome lists. |
 | `--abundance-distribution` | **Per-genome abundance model.** Set to `exponential` to assign each genome a weight from an exponential distribution (then normalized). Produces a few “abundant” and many “rare” genomes, similar to real communities. Use `--seed` for reproducibility. |
-| `--viral-taxonomy`, `--balance-viral-by-taxonomy` | **Taxonomy-aware viral balancing.** `--viral-taxonomy` is the path to the JSON from the `viral-taxonomy` command (viral prefix → taxonomy group). With `--balance-viral-by-taxonomy`, viral read limits are set so each taxonomy group (e.g. family) contributes equally. Use to avoid a few viral families dominating and to better train on under-represented groups. |
+| `--viral-taxonomy`, `--balance-viral-by-taxonomy` | **Taxonomy-aware viral balancing.** `--viral-taxonomy` is the path to the JSON from the `viral-taxonomy` command (viral accession → taxonomy group). With `--balance-viral-by-taxonomy`, viral read limits are set so each taxonomy group (e.g. family) contributes equally. Use to avoid a few viral families dominating and to better train on under-represented groups. |
 | `--filter-similar` | **Within-metagenome similarity filter.** Remove any read that is ≥90% similar (identity and coverage) to a read already kept. The tool oversamples and refills to try to reach the target count. Use to reduce near-duplicate sequences in a single metagenome. |
 | `--train-test-split` | **Train/test split with similarity filter.** Percentage of reads for training (e.g. 80). Outputs `*_train.fasta` and `*_test.fasta`. Any test read that is ≥ similarity threshold (default 90% identity over 80% length) to a train read is removed. Use for quick evaluation from one metagenome while avoiding inflated metrics from near-duplicate train/test pairs. |
+
+**Read and contig IDs; traceability.** Fixed-length segments are named **reads** (`{accession}_read_{idx}`); variable-length segments are **contigs** (`{accession}_contig_{idx}`). The FASTA/FASTQ description includes **`start=` and `end=`** (0-based positions on the source genome) so you can trace each read or contig back to its origin. With accession-named genome files (e.g. `NC_000001.1.fasta`), the prefix in the ID is the accession.
 
 ---
 
@@ -375,7 +377,7 @@ Output: `metagenome_train.fasta` and `metagenome_test.fasta`. Options: `--train-
 
 ### BLASTN filtering (EVE removal)
 
-EVEs in non-viral genomes can be misclassified as viral. BLAST non-viral vs viral; exclude chunks overlapping hits when building the metagenome.
+EVEs in non-viral genomes can be misclassified as viral. BLAST non-viral vs virus; exclude reads/contigs overlapping hits when building the metagenome.
 
 **Standalone:**
 
@@ -392,7 +394,7 @@ metagenome-generator chunk --input output/downloaded --output metagenome.fasta -
 
 ### Viral taxonomy (taxonomy-aware balancing)
 
-Fetch viral taxonomy from NCBI and write a JSON mapping viral prefixes to group (e.g. family). Use with `chunk` or `pipeline` and `--balance-viral-by-taxonomy` so each viral taxonomy group contributes equally.
+Fetch viral taxonomy from NCBI and write a JSON mapping **viral accession → taxonomy group** (e.g. `NC_001234.1` → Herpesviridae). Use with `chunk` or `pipeline` and `--balance-viral-by-taxonomy` so each viral taxonomy group contributes equally.
 
 ```bash
 metagenome-generator viral-taxonomy \
@@ -436,7 +438,7 @@ Or add `--run-seeker` to the pipeline.
 | `filter-test-against-train` | Remove from test FASTA reads similar to train (BLAST). **Use after temporal split** for rigorous evaluation. |
 | `migrate-snapshot` | Convert legacy snapshot to per-category metadata format. |
 | `blastn-filter` | BLAST non-viral vs viral; EVE intervals for chunk and optional provirus/EVE FASTA. |
-| `viral-taxonomy` | Fetch viral taxonomy; write viral_1→group JSON for `--balance-viral-by-taxonomy`. |
+| `viral-taxonomy` | Fetch viral taxonomy; write accession→group JSON for `--balance-viral-by-taxonomy`. |
 | `benchmark-recipe` | **Structured benchmark:** fixed N per category, R replicates; samples from snapshot, no NCBI search. |
 | `seeker` | Run Seeker on a metagenome FASTA. |
 

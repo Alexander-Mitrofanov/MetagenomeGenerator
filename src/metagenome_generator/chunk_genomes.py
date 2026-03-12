@@ -19,9 +19,13 @@ from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 
 from .genome_layout import (
+    ARCHAEA_DIR,
     ARCHAEA_PREFIX,
+    BACTERIA_DIR,
     BACTERIA_PREFIX,
+    PLASMID_DIR,
     PLASMID_PREFIX,
+    VIRUS_DIR,
     VIRUS_PREFIX,
     iter_genome_fastas,
 )
@@ -38,10 +42,24 @@ _PREFIX_TO_CATEGORY: list[tuple[str, str]] = [
 
 
 def _category_from_prefix(prefix: str) -> str:
-    """Return category name for a genome file prefix (bacterial_1 -> bacterial)."""
+    """Return category name for a genome file prefix (bacterial_1 -> bacterial; legacy)."""
     for category, p in _PREFIX_TO_CATEGORY:
         if prefix.startswith(p) or prefix == p.rstrip("_"):
             return category
+    return "other"
+
+
+def _category_from_path(path: Path) -> str:
+    """Return category name from parent directory (bacteria/, virus/, archaea/, plasmid/)."""
+    parent = path.parent.name.lower()
+    if parent == BACTERIA_DIR:
+        return "bacteria"
+    if parent == VIRUS_DIR:
+        return "virus"
+    if parent == ARCHAEA_DIR:
+        return "archaea"
+    if parent == PLASMID_DIR:
+        return "plasmid"
     return "other"
 
 
@@ -74,10 +92,10 @@ def _apply_viral_taxonomy_balance(
         if not stats:
             return read_limits
         prefix_to_max_reads = {p: max_r for p, _fp, _tb, max_r in stats}
-    # Group viral prefixes by taxonomy
+    # Group virus prefixes by taxonomy
     groups: dict[str, list[str]] = {}
-    for prefix, _ in prefixes_and_files:
-        if _category_from_prefix(prefix) != "viral":
+    for prefix, fp in prefixes_and_files:
+        if _category_from_path(fp) != "virus":
             continue
         group = viral_taxonomy.get(prefix, "unknown")
         groups.setdefault(group, []).append(prefix)
@@ -92,8 +110,8 @@ def _apply_viral_taxonomy_balance(
         return read_limits
     # Per-file limit in each group so group total = target_total
     result = list(read_limits)
-    for i, (prefix, _fp) in enumerate(prefixes_and_files):
-        if _category_from_prefix(prefix) != "viral" or i >= len(result):
+    for i, (prefix, fp) in enumerate(prefixes_and_files):
+        if _category_from_path(fp) != "virus" or i >= len(result):
             continue
         group = viral_taxonomy.get(prefix, "unknown")
         prefs = groups.get(group, [])
@@ -119,8 +137,8 @@ def _compute_read_limits(
         return []
     if abundance_profile:
         limits = []
-        for prefix, _ in prefixes_and_files:
-            cat = _category_from_prefix(prefix)
+        for prefix, fp in prefixes_and_files:
+            cat = _category_from_path(fp)
             w = abundance_profile.get(cat, 1.0)
             limits.append(max(1, int(base_reads_per_file * w)))
         return limits
@@ -253,22 +271,24 @@ def add_illumina_qualities_to_record(rec: SeqRecord) -> SeqRecord:
 
 
 def chunk_sequence(record, prefix: str, chunk_size: int, yield_coords: bool = False):
-    """Split a sequence into non-overlapping fixed-size chunks.
+    """Split a sequence into non-overlapping fixed-size simulated reads.
 
-    Only full-length chunks are emitted (i.e. trailing remainder is dropped).
+    Only full-length reads are emitted (trailing remainder is dropped).
+    Record id: {prefix}_read_{idx}; description includes start/end (0-based) for traceability.
     If yield_coords, yields (rec, start, end) for EVE overlap checks; else yields rec.
     """
     seq = record.seq
     idx = 0
     for i in range(0, len(seq) - chunk_size + 1, chunk_size):
-        sub = seq[i : i + chunk_size]
+        start, end = i, i + chunk_size
+        sub = seq[start:end]
         rec = SeqRecord(
             sub,
-            id=f"{prefix}_chunk_{idx}",
-            description=f"len={len(sub)} from {record.id}",
+            id=f"{prefix}_read_{idx}",
+            description=f"start={start} end={end}",
         )
         if yield_coords:
-            yield rec, i, i + chunk_size
+            yield rec, start, end
         else:
             yield rec
         idx += 1
@@ -286,6 +306,7 @@ def chunk_sequence_variable(
     """Split a sequence into non-overlapping contigs of random length in [min_len, max_len] (uniform).
 
     Simulates variable-length metagenomic contigs (e.g. 300–2000 bp).
+    Record id: {prefix}_contig_{idx}; description includes start/end (0-based) for traceability.
     If yield_coords, yields (rec, start, end); else yields rec.
     """
     rng = rng or random.Random()
@@ -297,14 +318,15 @@ def chunk_sequence_variable(
         end = min(pos + length, len(seq))
         if end - pos < min_len:
             break
-        sub = seq[pos:end]
+        start = pos
+        sub = seq[start:end]
         rec = SeqRecord(
             sub,
             id=f"{prefix}_contig_{idx}",
-            description=f"len={len(sub)} from {record.id}",
+            description=f"start={start} end={end}",
         )
         if yield_coords:
-            yield rec, pos, end
+            yield rec, start, end
         else:
             yield rec
         idx += 1
@@ -513,15 +535,15 @@ def build_metagenome(
     """Build a metagenome FASTA from input_path. Fixed-length or variable-length (min_length–max_length) contigs.
 
     If cap_total_reads is set, randomly downsample to that many reads (for balancing negative to positive).
-    If eve_intervals is set, chunks overlapping those intervals (EVE regions) are excluded.
+    If eve_intervals is set, reads/contigs overlapping those intervals (EVE regions) are excluded.
     If error_model is set (e.g. 'illumina'), applies platform-specific position-dependent errors; else if substitution_rate or indel_rate > 0, applies uniform mutations (seed used for reproducibility; default 42).
     If output_fastq is True, writes FASTQ instead of FASTA: applies Illumina-like errors and adds position-dependent Phred quality scores per base (output path suffix becomes .fastq).
-    If filter_similar is True: generate more chunks than needed (oversample), filter out sequences that are
+    If filter_similar is True: generate more reads than needed (oversample), filter out sequences that are
     >= similarity_threshold (default 90%%) similar to any already-kept sequence, then refill until target or max rounds.
     If return_records is True, do not write to out_path and return (count, list[SeqRecord]) for train-test split.
-    If extra_viral_fasta is set, chunks from that FASTA (multi-record, e.g. metavirome contigs) are merged in
+    If extra_viral_fasta is set, reads from that FASTA (multi-record, e.g. metavirome contigs) are merged in
     with prefix extra_viral_0, extra_viral_1, ... using the same length and mutation settings.
-    If abundance_profile is set (e.g. {"bacterial": 0.5, "viral": 2.0}), scale reads per file by category.
+    If abundance_profile is set (e.g. {"bacteria": 0.5, "virus": 2.0}), scale reads per file by category.
     If abundance_distribution == "exponential", assign per-genome weights from Exp(1) (use seed for reproducibility).
     If viral_taxonomy_json and balance_viral_by_taxonomy, viral read limits are set so each taxonomy group (e.g. family) contributes equally.
     If write_abundance is True, write a tab-separated file next to the output (stem_abundance.txt) with columns: genome_id (prefix), read_count, proportion (ground-truth composition for benchmarking).
@@ -705,8 +727,8 @@ def build_metagenome(
         from collections import Counter
         counts: Counter[str] = Counter()
         for rec in records:
-            if "_chunk_" in rec.id:
-                prefix = rec.id.rsplit("_chunk_", 1)[0]
+            if "_read_" in rec.id:
+                prefix = rec.id.rsplit("_read_", 1)[0]
             elif "_contig_" in rec.id:
                 prefix = rec.id.rsplit("_contig_", 1)[0]
             else:

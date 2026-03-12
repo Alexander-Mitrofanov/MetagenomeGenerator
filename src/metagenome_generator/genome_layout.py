@@ -8,13 +8,13 @@ or from a flat directory (backward compatible).
 
 from pathlib import Path
 
-# Category subdir names under the download root
+# Category subdir names under the download root (nouns: bacteria, virus, archaea, plasmid)
 BACTERIA_DIR = "bacteria"
 VIRUS_DIR = "virus"
 ARCHAEA_DIR = "archaea"
 PLASMID_DIR = "plasmid"
 
-# File prefix per category (filenames: {prefix}1.fasta, {prefix}2.fasta, ...)
+# Legacy flat-file prefix (for backward compatibility when reading old layouts)
 BACTERIA_PREFIX = "bacterial_"
 VIRUS_PREFIX = "viral_"
 ARCHAEA_PREFIX = "archaea_"
@@ -22,7 +22,7 @@ PLASMID_PREFIX = "plasmid_"
 
 
 def _category_dirs() -> list[tuple[str, str]]:
-    """(subdir_name, file_prefix) for each category."""
+    """(subdir_name, file_prefix) for each category. Prefix used only for flat fallback."""
     return [
         (BACTERIA_DIR, BACTERIA_PREFIX),
         (VIRUS_DIR, VIRUS_PREFIX),
@@ -48,7 +48,7 @@ def iter_genome_fastas(root: Path) -> list[tuple[str, Path]]:
 
 
 def get_viral_fasta_paths(root: Path) -> list[Path]:
-    """Paths to all viral genome FASTAs (virus/ or flat viral_*.fasta)."""
+    """Paths to all viral genome FASTAs (virus/*.fasta or flat viral_*.fasta for legacy)."""
     virus_dir = root / VIRUS_DIR
     if virus_dir.is_dir():
         return sorted(virus_dir.glob("*.fasta"))
@@ -83,7 +83,7 @@ def validate_genome_dir(root: Path) -> tuple[bool, str | None]:
     if not viral:
         return (
             False,
-            "Viral folder (virus/) must not be empty. Place viral genome FASTAs in virus/ or provide viral_*.fasta in the genome directory.",
+            "Viral folder (virus/) must not be empty. Place viral genome FASTAs (e.g. accession.fasta) in virus/.",
         )
 
     nonviral = get_nonviral_fasta_paths(root)

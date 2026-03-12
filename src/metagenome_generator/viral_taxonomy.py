@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-"""Fetch viral taxonomy from NCBI and produce prefix->group mapping for taxonomy-aware balancing.
+"""Fetch viral taxonomy from NCBI and produce accession->group mapping for taxonomy-aware balancing.
 
 Uses elink (nuccore -> taxonomy) to get taxid per accession, then efetch (taxonomy)
-to get lineage; extracts family or realm for each. Output JSON maps viral_1, viral_2, ...
-to group name (same order as viral list in accessions file).
+to get lineage; extracts family or realm for each. Output JSON maps each viral accession
+to taxonomy group (e.g. NC_001234.1 -> Herpesviridae).
 """
 
 import json
@@ -19,7 +19,6 @@ Entrez.email = os.environ.get("ENTREZ_EMAIL", "your_email@example.com")
 Entrez.api_key = os.environ.get("ENTREZ_API_KEY")
 
 from .download_genomes import get_accession_lists_from_data, load_accessions
-from .genome_layout import VIRUS_PREFIX
 
 logger = logging.getLogger(__name__)
 
@@ -188,15 +187,14 @@ def build_prefix_to_taxonomy(
     batch_size: int = BATCH_SIZE,
     progress_callback=None,
 ) -> dict[str, str]:
-    """Return dict viral_1 -> group, viral_2 -> group, ... (same order as viral_accessions)."""
+    """Return dict accession -> taxonomy group (e.g. NC_001234.1 -> Herpesviridae)."""
     groups = fetch_viral_taxonomy_groups(
         viral_accessions,
         level=level,
         batch_size=batch_size,
         progress_callback=progress_callback,
     )
-    prefix = VIRUS_PREFIX.rstrip("_")  # "viral"
-    return {f"{prefix}_{i + 1}": g for i, g in enumerate(groups)}
+    return dict(zip(viral_accessions, groups))
 
 
 def run_viral_taxonomy(
@@ -206,7 +204,7 @@ def run_viral_taxonomy(
     level: str = "family",
     batch_size: int = BATCH_SIZE,
 ) -> dict[str, str]:
-    """Load viral list from accessions file, fetch taxonomy, write prefix->group JSON. Returns the mapping."""
+    """Load viral list from accessions file, fetch taxonomy, write accession->group JSON. Returns the mapping."""
     data = load_accessions(accessions_file)
     _, viral_ids, _, _ = get_accession_lists_from_data(data)
     if not viral_ids:
@@ -233,11 +231,11 @@ def run_viral_taxonomy(
         json.dump(mapping, f, indent=2)
     n_unknown = sum(1 for v in mapping.values() if v == "unknown")
     logger.info("Viral taxonomy: wrote %s (%d viral, %d unknown)", output_path, len(mapping), n_unknown)
-    print(f"Wrote {output_path} ({len(mapping)} viral prefixes, {n_unknown} unknown)")
+    print(f"Wrote {output_path} ({len(mapping)} viral accessions, {n_unknown} unknown)")
     return mapping
 
 
 def load_viral_taxonomy(path: Path) -> dict[str, str]:
-    """Load prefix -> taxonomy group from JSON (e.g. viral_1 -> Herpesviridae)."""
+    """Load accession -> taxonomy group from JSON (e.g. NC_001234.1 -> Herpesviridae)."""
     with path.open() as f:
         return json.load(f)

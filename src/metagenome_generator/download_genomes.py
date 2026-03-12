@@ -21,13 +21,9 @@ from Bio import Entrez, SeqIO
 
 from .genome_layout import (
     ARCHAEA_DIR,
-    ARCHAEA_PREFIX,
     BACTERIA_DIR,
-    BACTERIA_PREFIX,
     PLASMID_DIR,
-    PLASMID_PREFIX,
     VIRUS_DIR,
-    VIRUS_PREFIX,
 )
 from .ncbi_search import get_queries, search_genomes
 
@@ -174,10 +170,10 @@ def fetch_sequences(ids: list[str], max_retries: int = 3) -> list:
 def _download_category_batched(
     ids: list[str],
     out_dir: Path,
-    prefix: str,
+    _prefix: str,
     category_label: str,
 ) -> None:
-    """Download genomes in batches; write one FASTA per ID. On batch failure, fall back to per-ID fetch."""
+    """Download genomes in batches; write one FASTA per accession, named by accession (e.g. NC_000001.1.fasta). On batch failure, fall back to per-ID fetch."""
     for start in range(0, len(ids), EFETCH_BATCH_SIZE):
         batch = ids[start : start + EFETCH_BATCH_SIZE]
         try:
@@ -186,18 +182,20 @@ def _download_category_batched(
             if len(records) != len(batch):
                 raise RuntimeError(f"Batch returned {len(records)} records for {len(batch)} IDs")
             for j, rec in enumerate(records):
-                path = out_dir / f"{prefix}{start + j + 1}.fasta"
-                print(f"Fetching {category_label} {start + j + 1}/{len(ids)}: {batch[j]} -> {path}")
+                acc = rec.id.split()[0]
+                path = out_dir / f"{acc}.fasta"
+                print(f"Fetching {category_label} {start + j + 1}/{len(ids)}: {batch[j]} -> {path.name}")
                 logger.info("Download: accession=%s origin=%s path=%s", batch[j], category_label, path)
                 SeqIO.write([rec], path, "fasta")
         except Exception as e:
             for k, gid in enumerate(batch):
-                path = out_dir / f"{prefix}{start + k + 1}.fasta"
-                print(f"Fetching {category_label} {start + k + 1}/{len(ids)}: {gid} -> {path}")
-                logger.info("Download: accession=%s origin=%s path=%s", gid, category_label, path)
+                print(f"Fetching {category_label} {start + k + 1}/{len(ids)}: {gid} -> {gid}.fasta")
+                logger.info("Download: accession=%s origin=%s", gid, category_label)
                 time.sleep(0.4)
                 try:
                     records = fetch_sequences([gid])
+                    acc = records[0].id.split()[0]
+                    path = out_dir / f"{acc}.fasta"
                     SeqIO.write(records, path, "fasta")
                 except Exception as e2:
                     print(f"  Warning: failed to fetch {gid}: {e2}")
@@ -303,18 +301,18 @@ def download_genomes(
             )
             print(f"Saved accession list to {save_accessions_to}")
 
-    _download_category_batched(bacterial_ids, bacteria_dir, BACTERIA_PREFIX, "bacterial")
-    _download_category_batched(viral_ids, virus_dir, VIRUS_PREFIX, "viral")
+    _download_category_batched(bacterial_ids, bacteria_dir, BACTERIA_DIR, "bacteria")
+    _download_category_batched(viral_ids, virus_dir, VIRUS_DIR, "virus")
 
     if archaea_ids:
         archaea_dir = output_dir / ARCHAEA_DIR
         archaea_dir.mkdir(parents=True, exist_ok=True)
-        _download_category_batched(archaea_ids, archaea_dir, ARCHAEA_PREFIX, "archaea")
+        _download_category_batched(archaea_ids, archaea_dir, ARCHAEA_DIR, "archaea")
 
     if plasmid_ids:
         plasmid_dir = output_dir / PLASMID_DIR
         plasmid_dir.mkdir(parents=True, exist_ok=True)
-        _download_category_batched(plasmid_ids, plasmid_dir, PLASMID_PREFIX, "plasmid")
+        _download_category_batched(plasmid_ids, plasmid_dir, PLASMID_DIR, "plasmid")
 
     logger.info("Download step complete: genomes saved in %s", output_dir.resolve())
     print("Done. Genome FASTAs saved in", output_dir.resolve())

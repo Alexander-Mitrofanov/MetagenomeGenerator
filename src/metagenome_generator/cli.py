@@ -257,7 +257,7 @@ def _add_chunk_subparser(subparsers) -> None:
         "--eve-intervals",
         type=Path,
         default=None,
-        help="Path to eve_intervals.json (from blastn-filter); exclude chunks overlapping EVE regions.",
+        help="Path to eve_intervals.json (from blastn-filter); exclude reads/contigs overlapping EVE regions.",
     )
     p.add_argument(
         "--forbid-ambiguous",
@@ -290,7 +290,7 @@ def _add_chunk_subparser(subparsers) -> None:
         type=str,
         default=None,
         metavar="KEY=VAL,...",
-        help="Per-category read weights, e.g. bacterial=0.5,viral=2,archaea=1,plasmid=1. Scales reads per file by category.",
+        help="Per-category read weights, e.g. bacteria=0.5,virus=2,archaea=1,plasmid=1. Scales reads per file by category.",
     )
     p.add_argument(
         "--abundance-distribution",
@@ -304,7 +304,7 @@ def _add_chunk_subparser(subparsers) -> None:
         type=Path,
         default=None,
         metavar="PATH",
-        help="JSON mapping viral_1, viral_2, ... to taxonomy group (e.g. family). Use with --balance-viral-by-taxonomy.",
+        help="JSON mapping viral accession -> taxonomy group (e.g. NC_001234.1 -> Herpesviridae). Use with --balance-viral-by-taxonomy.",
     )
     p.add_argument(
         "--balance-viral-by-taxonomy",
@@ -608,7 +608,7 @@ def _add_pipeline_subparser(subparsers) -> None:
         type=str,
         default=None,
         metavar="KEY=VAL,...",
-        help="Per-category read weights, e.g. bacterial=0.5,viral=2,archaea=1,plasmid=1.",
+        help="Per-category read weights, e.g. bacteria=0.5,virus=2,archaea=1,plasmid=1.",
     )
     p.add_argument(
         "--abundance-distribution",
@@ -622,7 +622,7 @@ def _add_pipeline_subparser(subparsers) -> None:
         type=Path,
         default=None,
         metavar="PATH",
-        help="JSON mapping viral_1, viral_2, ... to taxonomy group. Use with --balance-viral-by-taxonomy.",
+        help="JSON mapping viral accession -> taxonomy group. Use with --balance-viral-by-taxonomy.",
     )
     p.add_argument(
         "--balance-viral-by-taxonomy",
@@ -659,7 +659,7 @@ def _add_blastn_filter_subparser(subparsers) -> None:
         "--genome-dir",
         type=Path,
         required=True,
-        help="Directory containing bacterial_*, viral_*, and optionally archaea_*, plasmid_*.fasta",
+        help="Directory containing bacteria/, virus/, archaea/, plasmid/ with accession-named FASTA (e.g. NC_000001.1.fasta)",
     )
     p.add_argument(
         "--out-dir",
@@ -889,7 +889,7 @@ def _run_filter_test_against_train(args) -> None:
 def _add_viral_taxonomy_subparser(subparsers) -> None:
     p = subparsers.add_parser(
         "viral-taxonomy",
-        help="Fetch viral taxonomy from NCBI and write viral_1 -> family (or realm) JSON for --viral-taxonomy / --balance-viral-by-taxonomy.",
+        help="Fetch viral taxonomy from NCBI and write accession -> family (or realm) JSON for --viral-taxonomy / --balance-viral-by-taxonomy.",
     )
     p.add_argument(
         "--accessions-file",
