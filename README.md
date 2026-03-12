@@ -137,10 +137,6 @@ metagenome-generator chunk \
 
 ## Extended usage
 
-Sections below describe each feature and how to use it.
-
----
-
 ### Download genomes
 
 Obtain RefSeq genomes by category (bacteria, virus, archaea, plasmid) from NCBI Nucleotide. You specify **how many bacteria** and **how many virus** genomes separately; optionally add archaea and plasmid as extra negative samples. Each genome is saved as **`{accession}.fasta`** (e.g. `NC_000001.1.fasta`) in the corresponding category folder. Output layout: `bacteria/`, `virus/`, `archaea/`, `plasmid/` under the output directory.
@@ -234,9 +230,9 @@ metagenome-generator chunk \
 | `--eve-intervals` | **EVE exclusion.** Path to `eve_intervals.json` produced by `blastn-filter`. Reads/contigs that overlap these endogenous viral element (EVE) intervals on non-viral genomes are excluded from the metagenome. Use to avoid bacterial/archaeal regions that look viral and would confound viral vs. non-viral classifiers. |
 | `--forbid-ambiguous` | **Exclude ambiguous bases.** Discard any read that contains non-ACGT characters (e.g. N, R, Y). Use when your pipeline or classifier assumes strict ACGT-only sequence, or to simulate cleaner sequencing. |
 | `--substitution-rate`, `--indel-rate` | **Mutation simulation.** Introduce substitutions and/or indels at the given per-base rate (0–1). Use to test classifier robustness to sequencing error or divergence (e.g. 0.01 for 1% substitution rate). Combine with `--seed` for reproducible mutated datasets. |
-| `--error-model` | **Platform-specific sequencing errors.** Set to `illumina` to apply position-dependent substitution (low at 5′, higher toward 3′, mimicking Illumina quality drop). Use for realistic benchmarking when training or evaluating on short-read data. Use `--seed` for reproducibility. |
-| `--output-fastq` | **FASTQ output with quality scores.** Write **FASTQ** (single-end) instead of FASTA, with per-base Phred quality scores (Illumina-like position-dependent). Automatically enables Illumina-like errors so qualities match the sequence. Use when downstream tools expect FASTQ (e.g. aligners, variant callers). Use `--seed` for reproducibility. |
-| `--write-abundance` | **Ground-truth abundance file.** Write a tab-separated file `{output_stem}_abundance.txt` next to the metagenome (columns: genome_id, read_count, proportion). Use for benchmarking abundance estimators or when you need to know how many reads came from each genome. |
+| `--error-model` | **Platform-specific sequencing errors.** Set to `illumina` for position-dependent substitution. See [Error model, FASTQ, and abundance file](#error-model-fastq-and-abundance-file) below. |
+| `--output-fastq` | **FASTQ output.** Write single-end FASTQ with per-base Phred qualities. See [Error model, FASTQ, and abundance file](#error-model-fastq-and-abundance-file) below. |
+| `--write-abundance` | **Ground-truth abundance file.** Write `{output_stem}_abundance.txt` (genome_id, read_count, proportion). See [Error model, FASTQ, and abundance file](#error-model-fastq-and-abundance-file) below. |
 | `--extra-viral-fasta` | **Merge user viral sequences.** Path to a FASTA of additional viral sequences (e.g. metavirome contigs, custom viral set). Reads are generated from them as for RefSeq viral genomes and merged into the viral pool. Use to combine public RefSeq viral data with your own viral contigs in one metagenome. |
 | `--abundance-profile` | **Per-category read weights.** Comma-separated `category=weight`, e.g. `bacteria=0.5,virus=2,archaea=1,plasmid=1`. Scales how many reads are taken from each category relative to the base limit. Use to simulate uneven community composition (e.g. more virus, less bacteria) without changing genome lists. |
 | `--abundance-distribution` | **Per-genome abundance model.** Set to `exponential` to assign each genome a weight from an exponential distribution (then normalized). Produces a few “abundant” and many “rare” genomes, similar to real communities. Use `--seed` for reproducibility. |
@@ -245,9 +241,6 @@ metagenome-generator chunk \
 | `--train-test-split` | **Train/test split with similarity filter.** Percentage of reads for training (e.g. 80). Outputs `*_train.fasta` and `*_test.fasta`. Any test read that is ≥ similarity threshold (default 90% identity over 80% length) to a train read is removed. Use for quick evaluation from one metagenome while avoiding inflated metrics from near-duplicate train/test pairs. |
 
 **Read and contig IDs; traceability.** Fixed-length segments are named **reads** (`{accession}_read_{idx}`); variable-length segments are **contigs** (`{accession}_contig_{idx}`). The FASTA/FASTQ description includes **`start=` and `end=`** (0-based positions on the source genome) so you can trace each read or contig back to its origin. With accession-named genome files (e.g. `NC_000001.1.fasta`), the prefix in the ID is the accession.
-
----
-
 
 ---
 
