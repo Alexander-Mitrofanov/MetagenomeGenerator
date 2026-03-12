@@ -1,6 +1,6 @@
 # Arc MAGE
 
-![Arc MAGE](logo.png)
+<img src="logo.png" width="50%">
 
 **Arc MAGE** — *Automated Reproducible Curation · Metagenome Augmented Generation Engine* — builds simulated metagenome FASTA datasets from NCBI RefSeq (or your own genomes) for training and evaluating sequence classifiers (e.g. viral vs. prokaryotic, phage vs. bacteria). **Arc** = automated, reproducible curation (snapshots, seeds, train/test); **MAGE** = metagenome augmented generation engine (distinct from other tools using “MAGE”, e.g. Meta-Analysis of Gene Expression).
 
