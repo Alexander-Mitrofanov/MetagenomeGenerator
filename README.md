@@ -2,7 +2,7 @@
 
 **MERGE** = **M**etagenome **E**ngine for **R**eproducible **G**eneration & **E**valuation.
 
-MERGE generates synthetic metagenome datasets (FASTA or FASTQ) for training and evaluating sequence classifiers—e.g. viral vs. prokaryotic or phage vs. bacteria. Users supply reference genomes from NCBI RefSeq (via built-in download and optional date-stamped accession snapshots) or place their own genome FASTAs in category folders (bacteria, virus, archaea, plasmid). The pipeline splits genomes into fixed- or variable-length simulated reads (or variable-length contigs), applies optional sequencing-error and mutation models, and outputs a single metagenome file with traceable read identifiers and optional ground-truth abundance. Strengths include reproducible runs via snapshots and seeds; rigorous train/test setups (temporal or random split with BLAST-based removal of test reads similar to train); handling of endogenous viral elements (EVE) in non-viral genomes via BLAST filtering and optional provirus export; and a structured benchmark recipe (fixed N genomes per category, optional replicates) for method comparison.
+MERGE builds synthetic metagenome FASTA/FASTQ from NCBI RefSeq or your own genome FASTAs (bacteria, virus, archaea, plasmid). It splits genomes into fixed- or variable-length reads (or contigs), applies optional error and mutation models, and outputs one metagenome with traceable read IDs and optional ground-truth abundance—for training and evaluating sequence classifiers (e.g. viral vs. prokaryotic, phage vs. bacteria).
 
 ---
 
@@ -16,6 +16,7 @@ MERGE generates synthetic metagenome datasets (FASTA or FASTQ) for training and 
 - [Quick start](#quick-start)
 - [Extended usage](#extended-usage)
 - [Command reference](#command-reference)
+- [Capabilities summary](#capabilities-summary)
 - [Project structure](#project-structure)
 - [Notes](#notes)
 
@@ -23,19 +24,7 @@ MERGE generates synthetic metagenome datasets (FASTA or FASTQ) for training and 
 
 ## What it does
 
-MERGE downloads bacterial, viral, archaeal, and plasmid genomes from NCBI (or uses your own FASTA files in the same folder layout), splits them into fixed- or variable-length reads, and writes a single metagenome FASTA or FASTQ. Use it when you need synthetic training or evaluation data for sequence classifiers (e.g. viral vs. prokaryotic, phage vs. bacteria). It supports:
-
-- **Reproducible runs.** Snapshot accession lists to a date-stamped JSON and re-download or re-run read generation on the same genome set anytime. Use this when you need identical inputs across runs, machines, or months—e.g. for paper reproducibility, benchmarks, or comparing methods on a frozen catalog. Optionally cap how many genomes to use per category (`--max-bacteria`, `--max-virus`, etc.) with a fixed seed so subset selection is reproducible too.
-
-- **Rigorous train/test evaluation.** Split by NCBI submission date (temporal: train on “past”, test on “future” accessions) or by a percentage of reads (random split). In both cases, MERGE can remove from the test set any reads that are highly similar to the training set (BLAST-based identity and coverage threshold), so you avoid inflated metrics from near-identical strains. Use this when you care about generalization and want to avoid data leakage.
-
-- **EVE handling.** BLAST non-viral genomes (bacteria, archaea, plasmid) against a viral database to find endogenous viral elements (EVEs); exclude those regions when generating reads, and optionally export them as a separate FASTA. Use this when you need non-viral genomes that are not contaminated by viral-looking regions that would confound viral vs. non-viral classifiers.
-
-- **Structured benchmark recipe.** Generate multiple replicate datasets with a fixed number of genomes per category (e.g. 50 bacterial, 50 viral per replicate) from a snapshot, in one command. Use this when you want standardized, comparable synthetic datasets for method comparison or for reporting metrics as mean ± std across replicates.
-
-- **Extra options.** Add mutation simulation (substitutions, indels), merge in user-provided viral FASTA (e.g. metavirome contigs), restrict to complete genomes only, apply per-category or per-genome abundance models, and balance viral reads by taxonomy group. Use these when you need realistic noise, custom viral sets, or controlled community composition.
-
-- **In-house datasets.** Place your own genome FASTAs in `bacteria/`, `virus/`, `archaea/`, and/or `plasmid/` and run `chunk` with `--input` pointing to that directory; no NCBI download required. Use this when you have isolates, assemblies, or phages of your own and want to build a synthetic metagenome from them.
+**In short:** Reproducible runs (snapshots + seeds; optional `--max-*` subset); rigorous train/test (temporal or percentage split, BLAST-based removal of test reads similar to train); EVE handling (exclude or export); structured benchmark (fixed N per category, replicates); mutations, user viral FASTA, complete-only, abundance models, taxonomy balancing; in-house datasets (your FASTAs in `bacteria/`, `virus/`, etc.). For workflows and commands, see [Use cases at a glance](#use-cases-at-a-glance).
 
 ---
 
@@ -71,8 +60,6 @@ The command queries NCBI for all RefSeq accessions that match the chosen categor
 | **Temporal train/test** | Evaluate generalization to “future” genomes: train on accessions submitted before a cutoff date and test on accessions on or after that date, with BLAST-based removal of test reads that are highly similar to train (avoids inflated metrics from near-identical strains). | `temporal-split-info` → `temporal-split` → build train and test metagenomes from the two JSONs → **`filter-test-against-train`** to drop test reads similar to train. |
 | **Single-dataset train/test** | Split one synthetic metagenome into train and test fractions (e.g. 80/20) with automatic removal of test reads that are ≥ threshold similar to train, for quick evaluation without temporal split. | `chunk` or `pipeline` with `--train-test-split 80` (similarity filter applied automatically). |
 | **Structured benchmark** | Produce multiple replicate datasets with fixed N genomes per category (e.g. 50 bacterial, 50 viral per replicate) sampled from a snapshot, for method comparison and reporting mean ± std across replicates in a standardized way. | `snapshot` → `benchmark-recipe --accessions-file <snap> --output-dir out --per-category 50 --replicates 5` |
-
-Use a dedicated output directory (e.g. `working_directory/`) for all runs.
 
 ---
 
@@ -185,7 +172,7 @@ metagenome-generator download \
 | `--save-accessions` | **Save chosen accessions.** After searching NCBI, write the selected accession lists and a UTC timestamp to this JSON path. Use this file later as `--accessions-file` to re-download the same set. Ignored when `--accessions-file` is set. |
 | `--complete-only` | **Complete genomes only.** When searching NCBI (no `--accessions-file`), restrict results to complete genomes and exclude WGS/draft (uses NCBI `complete[Properties]` and `NOT WGS[Properties]`). For reproducible complete-only runs, create a snapshot with `snapshot --complete-only` and use that JSON as `--accessions-file`. Ignored when using `--accessions-file`. |
 
-**Large snapshots:** A snapshot can contain tens or hundreds of thousands of accessions. Downloading the full set is often impractical. Use **`--max-bacteria N --max-virus M`** (and optionally `--max-archaea`, `--max-plasmid`) with **`--accessions-file`** to download only a subset; use **`--sample-seed`** for a reproducible subset.
+For large snapshots, use `--max-*` and `--sample-seed` (see [Accession snapshot](#accession-snapshot)).
 
 ---
 
@@ -261,50 +248,16 @@ metagenome-generator chunk \
 
 ---
 
-### Sequencing platform error model (Illumina-like)
 
-**Purpose:** Simulate **platform-specific** sequencing errors so that synthetic reads behave like real short-read data (e.g. Illumina). Tools such as Grinder, CAMISIM, and MetLab use similar models for benchmarking.
+---
 
-**Why it matters:**
+### Error model, FASTQ, and abundance file
 
-- **Realistic benchmarking** — Classifiers are often trained or deployed on Illumina (or similar) data, where base quality drops toward the 3′ end and substitutions dominate over indels. Using error-free or uniformly random mutations can overestimate performance; a position-dependent Illumina-like model makes benchmarks more representative of production data.
-- **Robustness** — Evaluating on reads with platform-like noise shows how well a model generalizes to real sequencing errors rather than only to ideal sequences.
-- **Reproducibility** — With `--seed`, the same error pattern is applied every time, so results are comparable across runs.
+- **`--error-model illumina`** — Position-dependent substitution (low at 5′, higher at 3′); use for realistic short-read benchmarking. Use `--seed` for reproducibility.
+- **`--output-fastq`** — Write FASTQ with per-base Phred qualities (Illumina-like). Use when downstream tools expect FASTQ (e.g. aligners).
+- **`--write-abundance`** — Write `{stem}_abundance.txt` next to the metagenome (columns: genome_id, read_count, proportion). Use as ground truth for abundance estimators or method papers.
 
-**Usage:** Add `--error-model illumina` to the read-generation step (`chunk`) or `pipeline`. The Illumina-like model applies **position-dependent substitution** only (no indels): error rate is low at the 5′ end and increases toward the 3′ end, matching typical quality decay. Use with `--seed` for reproducible datasets.
-
-```bash
-metagenome-generator chunk --input output/downloaded --output metagenome.fasta --output-dir output/metagenome \
-  --sequence-length 250 --reads-per-organism 1000 --error-model illumina --seed 42
-```
-
-**FASTQ output (`--output-fastq`):** Use `--output-fastq` to write **FASTQ** instead of FASTA, with per-base Phred quality scores (position-dependent, Illumina-like). The tool applies Illumina-like errors so that quality scores match the error profile. Output path uses `.fastq` (e.g. `metagenome.fastq`). Use when downstream tools expect FASTQ with quality scores (e.g. aligners, variant callers).
-
-```bash
-metagenome-generator chunk --input output/downloaded --output metagenome --output-dir output/metagenome \
-  --sequence-length 250 --reads-per-organism 1000 --output-fastq --seed 42
-# Writes output/metagenome/metagenome.fastq with Phred qualities
-```
-
-**Abundance file (`--write-abundance`):** Optionally write a **ground-truth abundance file** next to the metagenome (e.g. `metagenome_abundance.txt`): one row per genome with `genome_id`, `read_count`, and `proportion` (0–1). This is the known composition of the synthetic sample.
-
-**Strengths:**
-- **Benchmarking** — Compare predicted vs true per-genome (or per-taxon) abundances when evaluating abundance estimators, compositional methods, or classifiers that output proportions.
-- **Reproducibility** — See exactly how many reads came from each genome without re-parsing FASTQ headers or re-running the simulator; the file is a compact, human-readable summary.
-- **Downstream** — Feed the same format into pipelines that expect a sample composition or count table for validation, reporting, or as reference for method comparison.
-
-**Use cases:**
-- **Abundance estimation** — Train or test tools that predict taxon/genome proportions; use the file as ground truth for correlation, RMSE, or other metrics.
-- **Method papers** — Report “synthetic metagenomes with known composition” and attach the abundance file so reviewers or users can verify or reuse the setup.
-- **Quality control** — Quickly check that the simulated mix matches your intent (e.g. balanced vs skewed) without counting reads in the FASTQ.
-
-**Usage:** Add `--write-abundance` to the read-generation step (`chunk`) or `pipeline`. The file is written next to the main output (same stem + `_abundance.txt`). Works with both FASTA and FASTQ output.
-
-```bash
-metagenome-generator chunk --input output/downloaded --output metagenome.fasta --output-dir output/metagenome \
-  --sequence-length 250 --reads-per-organism 1000 --write-abundance
-# Creates output/metagenome/metagenome.fasta and output/metagenome/metagenome_abundance.txt
-```
+Example: add `--error-model illumina --output-fastq --write-abundance --seed 42` to `chunk` or `pipeline`.
 
 ---
 
@@ -326,28 +279,15 @@ Pipeline accepts the same read-generation options (e.g. `--train-test-split`, `-
 
 ---
 
-### Accession snapshot (reproducible runs)
+### Accession snapshot (reference)
 
-Save a full catalog of matching NCBI accessions to a date-stamped JSON. No sequences are downloaded. Use the JSON as `--accessions-file` for reproducible download and read generation.
-
-```bash
-metagenome-generator snapshot
-```
-
-By default, each category stores `create_date` and `title` per accession (for temporal split and auditing). Use `--no-metadata` for lists only. Use `--complete-only` to restrict to complete genomes; then use that snapshot with `--accessions-file` for reproducible complete-only runs. Legacy snapshots: `metagenome-generator migrate-snapshot <path>`.
+See [Accession snapshot](#accession-snapshot) above. Command: `metagenome-generator snapshot --output <path>`. Options: `--no-metadata` (IDs only), `--complete-only`. Legacy: `metagenome-generator migrate-snapshot <path>`.
 
 ---
 
 ### Structured benchmark recipe
 
-**Purpose:** Generate **fixed-N-per-category** benchmark datasets with **optional replicates** in one command. Each replicate uses a different random sample of genomes from your snapshot (and a distinct seed for read generation), so you get R comparable datasets (e.g. for reporting mean ± std or running multiple evaluation runs). No NCBI search at recipe time—everything is sampled from the snapshot, so runs are **reproducible** and **fast** after the first snapshot.
-
-**Strengths:**
-
-- **Comparable to published benchmarks** — Same design as in tools like VirSorter2 (e.g. 50 per category, 5 replicates). Fixed N per category avoids ad-hoc choices and makes your numbers directly comparable to papers.
-- **Reproducible** — One snapshot + one seed gives the same replicate structure every time. Share the snapshot and seed and others can regenerate the same benchmark.
-- **Fair evaluation** — Balanced design (e.g. 50 viral, 50 bacterial, 50 plasmid) avoids class imbalance and makes metrics interpretable.
-- **One command** — No manual scripting of “download 50+50, generate reads, repeat with another seed.” One subcommand produces `replicate_001/`, `replicate_002/`, … each with `downloaded/` and `metagenome/metagenome.fasta`.
+Fixed N per category (e.g. 50 bacterial, 50 viral), optional replicates; one command, reproducible and comparable to published benchmarks. No NCBI search at recipe time—samples from your snapshot.
 
 **Example:**
 
@@ -377,7 +317,7 @@ Two workflows:
 - **Temporal split** — Split accessions by NCBI submission date; build train and test metagenomes separately; then run **`filter-test-against-train`** to remove test reads that are highly similar to train. Use when you want “train on past, test on future” (e.g. generalization to novel viruses).
 - **Percentage split** — Build one metagenome and split reads (e.g. 80% train, 20% test); the tool automatically removes from test any read ≥ threshold similar to a train read. Use for quick train/test from a single dataset.
 
-**Why similarity filtering matters:** Different strains or closely related genomes can appear in both train and test and inflate metrics. Removing test reads similar to train is standard practice (e.g. DeepVirFinder, VirFinder: temporal holdout + avoiding near-duplicates). The tool supports both workflows and applies or offers this filter in each.
+Removing test reads similar to train avoids inflated metrics from near-identical strains; MERGE supports this for both temporal and percentage split.
 
 ---
 
@@ -502,25 +442,13 @@ Full options: `metagenome-generator <command> --help`.
 
 ## Capabilities summary
 
-| Capability | Description |
-|------------|-------------|
-| Download by category | RefSeq bacteria, virus, archaea, plasmid from NCBI. |
-| Read generation | Split genomes into fixed- or variable-length reads; balanced or weighted. |
-| Reproducible datasets | Snapshot accessions to JSON; re-download and re-run read generation on same set. |
-| Temporal train/test | Split by CreateDate; **filter-test-against-train** for similarity. |
-| EVE removal / export | BLAST non-viral vs viral; exclude/export provirus regions. |
-| Similarity filtering | Drop test reads similar to train (both temporal and percentage split). |
-| Mutation simulation | Substitution/indel rates for robustness tests. |
-| **Sequencing platform error model** | Illumina-like position-dependent errors for realistic short-read benchmarking. |
-| **FASTQ output with qualities** | `--output-fastq`: single-end FASTQ with per-base Phred qualities and Illumina-like errors. |
-| **Abundance file (ground-truth)** | `--write-abundance`: write genome_id, read_count, proportion next to output for benchmarking. |
-| Extra viral FASTA | Merge user viral sequences with RefSeq viral. |
-| Genome completeness | `--complete-only` in snapshot and download. |
-| Abundance model | Per-category or per-genome (e.g. exponential) weights. |
-| Taxonomy-aware viral balance | Balance viral reads by family/realm. |
-| **Structured benchmark recipe** | Fixed N per category, R replicates; one command; comparable, reproducible, balanced. |
-| Ambiguous-base filter | Exclude reads with N (e.g. `--forbid-ambiguous`). |
-| Seeker integration | Run Seeker from the same workflow. |
+| Area | Features |
+|------|----------|
+| Genomes | Download by category (RefSeq); in-house FASTAs; snapshot for reproducibility; `--complete-only`. |
+| Read generation | Fixed/variable length; balanced or weighted; `--forbid-ambiguous`; mutation rates; Illumina-like errors; FASTQ + abundance file. |
+| Train/test | Temporal split by CreateDate or percentage split; **filter-test-against-train** / similarity filtering. |
+| EVE | BLAST non-viral vs viral; exclude or export provirus regions. |
+| Benchmark | `benchmark-recipe`: fixed N per category, R replicates; viral taxonomy balancing; extra viral FASTA; Seeker. |
 
 ---
 
