@@ -83,14 +83,14 @@ def validate_genome_dir(root: Path) -> tuple[bool, str | None]:
     if not viral:
         return (
             False,
-            "Viral folder (virus/) must not be empty. Place viral genome FASTAs (e.g. accession.fasta) in virus/.",
+            "Viral folder (virus/) must not be empty. Place viral genome FASTAs (from download or your own in-house files) in virus/.",
         )
 
     nonviral = get_nonviral_fasta_paths(root)
     if not nonviral:
         return (
             False,
-            "At least one of bacteria/, archaea/, or plasmid/ must be non-empty. Place genome FASTAs in the corresponding folders.",
+            "At least one of bacteria/, archaea/, or plasmid/ must be non-empty. Place genome FASTAs (from download or your own in-house files) in the corresponding folders.",
         )
 
     return True, None

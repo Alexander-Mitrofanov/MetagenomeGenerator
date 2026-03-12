@@ -1,10 +1,8 @@
-# Arc MAGE
+# MERGE
 
-<p align="center">
-  <img src="logo.png" width="50%">
-</p>
+**MERGE** = **M**etagenome **E**ngine for **R**eproducible **G**eneration & **E**valuation.
 
-**Arc MAGE** — *Automated Reproducible Curation · Metagenome Augmented Generation Engine* — builds simulated metagenome FASTA datasets from NCBI RefSeq (or your own genomes) for training and evaluating sequence classifiers (e.g. viral vs. prokaryotic, phage vs. bacteria). **Arc** = automated, reproducible curation (snapshots, seeds, train/test); **MAGE** = metagenome augmented generation engine (distinct from other tools using “MAGE”, e.g. Meta-Analysis of Gene Expression).
+MERGE generates synthetic metagenome datasets (FASTA or FASTQ) for training and evaluating sequence classifiers—e.g. viral vs. prokaryotic or phage vs. bacteria. Users supply reference genomes from NCBI RefSeq (via built-in download and optional date-stamped accession snapshots) or place their own genome FASTAs in category folders (bacteria, virus, archaea, plasmid). The pipeline chunks genomes into fixed- or variable-length reads, applies optional sequencing-error and mutation models, and outputs a single metagenome file with traceable read identifiers and optional ground-truth abundance. Strengths include reproducible runs via snapshots and seeds; rigorous train/test setups (temporal or random split with BLAST-based removal of test reads similar to train); handling of endogenous viral elements (EVE) in non-viral genomes via BLAST filtering and optional provirus export; and a structured benchmark recipe (fixed N genomes per category, optional replicates) for method comparison.
 
 ---
 
@@ -25,7 +23,7 @@
 
 ## What it does
 
-Arc MAGE downloads bacterial, viral, archaeal, and plasmid genomes from NCBI (or uses **your own FASTA files** in the same folder layout), splits them into fixed- or variable-length reads, and writes a single metagenome FASTA. It supports:
+MERGE downloads bacterial, viral, archaeal, and plasmid genomes from NCBI (or uses **your own FASTA files** in the same folder layout), splits them into fixed- or variable-length reads, and writes a single metagenome FASTA. It supports:
 
 - **In-house datasets** — place your genome FASTAs in `bacteria/`, `virus/`, `archaea/`, `plasmid/` and run `chunk`; no download required.
 - **Reproducible runs** — snapshot accession lists to JSON and re-download or re-chunk the same set anytime.

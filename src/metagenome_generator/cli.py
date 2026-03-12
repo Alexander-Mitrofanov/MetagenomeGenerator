@@ -198,7 +198,7 @@ def _add_chunk_subparser(subparsers) -> None:
         "--input",
         type=Path,
         required=True,
-        help="Input FASTA file or directory of genome FASTAs",
+        help="Directory with bacteria/, virus/, archaea/, plasmid/ (each with *.fasta), or path to a single FASTA. Supports NCBI download output or your own in-house genome FASTAs.",
     )
     p.add_argument(
         "--output",
@@ -1440,7 +1440,7 @@ def _run_temporal_split(args) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Metagenome simulator (download, snapshot, chunk, pipeline, blastn-filter, viral-taxonomy, seeker, temporal-split, temporal-split-info, filter-test-against-train, benchmark-recipe)",
+        description="MERGE — Metagenome Engine for Reproducible Generation & Evaluation. Commands: download, snapshot, chunk, pipeline, blastn-filter, viral-taxonomy, seeker, temporal-split, temporal-split-info, filter-test-against-train, benchmark-recipe",
     )
     subparsers = parser.add_subparsers(dest="command")
     subparsers.required = True

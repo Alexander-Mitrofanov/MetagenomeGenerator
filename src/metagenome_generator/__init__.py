@@ -1,4 +1,4 @@
-"""Metagenome Generator: build simulated metagenome FASTAs from NCBI genomes."""
+"""MERGE (Metagenome Engine for Reproducible Generation & Evaluation): build simulated metagenome FASTAs from NCBI or in-house genomes."""
 
 __version__ = "0.1.0"
 
