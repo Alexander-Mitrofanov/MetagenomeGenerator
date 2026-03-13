@@ -37,8 +37,6 @@ You do **not** need to build your own accession snapshot or viral reference data
 
 If you need a custom snapshot date or a DB built from a different snapshot, use the `snapshot` and `build-viral-db` commands as described below.
 
-*Maintainers:* To publish a new viral DB, run `build-viral-db`, then create a GitHub Release and attach the dated folder as a tarball (e.g. `tar czvf viral_db_YYYY-MM-DD.tar.gz -C viral_reference viral_db_YYYY-MM-DD`).
-
 ---
 
 ## Accession snapshot

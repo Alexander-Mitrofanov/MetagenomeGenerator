@@ -147,6 +147,11 @@ def _date_to_comparable(s: str) -> tuple[int, int, int]:
         return (0, 0, 0)
 
 
+def _comparable_to_iso(d: tuple[int, int, int]) -> str:
+    """Format (y, m, d) as YYYY-MM-DD."""
+    return f"{d[0]:04d}-{d[1]:02d}-{d[2]:02d}"
+
+
 def split_ids_by_date(
     ids: list[str],
     date_by_id: dict[str, str],
@@ -276,6 +281,111 @@ def run_temporal_split_info(
         print("  Test  = CreateDate >= split date (newer entries)")
         print()
         print("  Run 'temporal-split' with this --split-date to write train/test JSONs.")
+
+    return result
+
+
+def run_temporal_split_search(
+    accessions_file: Path,
+    min_train: int,
+    min_test: int,
+    *,
+    batch_size: int = ESUMMARY_BATCH_SIZE,
+    verbose: bool = True,
+) -> dict:
+    """Find a split date such that train set has at least min_train and test set at least min_test.
+
+    Uses CreateDate from snapshot metadata or NCBI. Returns the latest (most recent) split date
+    that satisfies both bounds, so the test set is as large as possible while keeping enough train.
+    """
+    path = Path(accessions_file)
+    data = load_accessions(path)
+    bacterial, viral, archaea, plasmid = get_accession_lists_from_data(data)
+    all_ids = list(dict.fromkeys(bacterial + viral + archaea + plasmid))
+    if not all_ids:
+        raise ValueError(f"No accessions found in {path}")
+
+    metadata = get_accession_metadata_from_data(data)
+    if metadata:
+        date_by_id = {
+            acc: m["create_date"]
+            for acc, m in metadata.items()
+            if isinstance(m, dict) and m.get("create_date")
+        }
+        if verbose:
+            print(f"Using CreateDate from snapshot metadata for {len(date_by_id):,} accessions.")
+    else:
+        if verbose:
+            print(f"Fetching CreateDate for {len(all_ids):,} accessions from NCBI (batches of {batch_size})...")
+        date_by_id = fetch_accession_dates(all_ids, batch_size=batch_size)
+
+    missing = len(all_ids) - len(date_by_id)
+    if missing and verbose:
+        print(f"  Note: {missing} accessions had no CreateDate; counted as train.")
+
+    acc_with_dates = [
+        (acc, _date_to_comparable(date_by_id[acc]))
+        for acc in all_ids
+        if date_by_id.get(acc) and _date_to_comparable(date_by_id[acc]) != (0, 0, 0)
+    ]
+    acc_with_dates.sort(key=lambda x: x[1])
+    unique_dates = []
+    seen = set()
+    for _acc, d in acc_with_dates:
+        if d not in seen:
+            seen.add(d)
+            unique_dates.append(d)
+
+    best_date_iso = None
+    best_train = 0
+    best_test = 0
+    for d in unique_dates:
+        split_iso = _comparable_to_iso(d)
+        train_ids, test_ids = split_ids_by_date(all_ids, date_by_id, split_iso)
+        if len(train_ids) >= min_train and len(test_ids) >= min_test:
+            best_date_iso = split_iso
+            best_train = len(train_ids)
+            best_test = len(test_ids)
+
+    if best_date_iso is None:
+        raise ValueError(
+            f"No split date found with train>={min_train} and test>={min_test}. "
+            "Try lower min_train/min_test or use a snapshot with more accessions."
+        )
+
+    def split_list(ids: list[str]) -> tuple[list[str], list[str]]:
+        return split_ids_by_date(ids, date_by_id, best_date_iso)
+
+    b_train, b_test = split_list(bacterial)
+    v_train, v_test = split_list(viral)
+    a_train, a_test = split_list(archaea)
+    p_train, p_test = split_list(plasmid)
+
+    result = {
+        "suggested_date": best_date_iso,
+        "train_count": best_train,
+        "test_count": best_test,
+        "per_category": {
+            "bacterial": {"train": len(b_train), "test": len(b_test)},
+            "viral": {"train": len(v_train), "test": len(v_test)},
+            "archaea": {"train": len(a_train), "test": len(a_test)},
+            "plasmid": {"train": len(p_train), "test": len(p_test)},
+        },
+    }
+
+    if verbose:
+        print()
+        print(f"Suggested --split-date: {best_date_iso}  (train={best_train:,}, test={best_test:,})")
+        print()
+        print("  Category   |   Train |    Test")
+        print("  -----------+---------+--------")
+        for cat, key in [("bacterial", "bacterial"), ("viral", "viral"), ("archaea", "archaea"), ("plasmid", "plasmid")]:
+            r = result["per_category"][key]
+            print(f"  {cat:11} | {r['train']:>7,} | {r['test']:>7,}")
+        print("  -----------+---------+--------")
+        print(f"  {'Total':11} | {best_train:>7,} | {best_test:>7,}")
+        print()
+        print("  Run: metagenome-generator temporal-split --accessions-file <path> --split-date", best_date_iso)
 
     return result
 

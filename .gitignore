@@ -29,6 +29,7 @@ output_*/
 data/
 working_directory/
 viral_reference/
+viral_db_*.tar.gz
 
 # Snapshot run logs (in snapshots/)
 snapshots/*.log
