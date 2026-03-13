@@ -1,14 +1,13 @@
 # CHIMERA
 
-**CHIMERA** = **C**onfigurable **H**ybrid **I**n-silico **M**etagenome **E**mulator for **R**ead **A**nalysis.
+**CHIMERA:** **C**onfigurable **H**ybrid **I**n-silico **M**etagenome **E**mulator for **R**ead **A**nalysis.
 
-CHIMERA builds synthetic metagenome FASTA/FASTQ from NCBI RefSeq or your own genome FASTAs (bacteria, virus, archaea, plasmid). It splits genomes into fixed- or variable-length reads (or contigs), applies optional error and mutation models, and outputs one metagenome with traceable read IDs and optional ground-truth abundance—for training and evaluating sequence classifiers (e.g. viral vs. prokaryotic, phage vs. bacteria).
+CHIMERA is a pipeline for generating synthetic metagenome datasets (FASTA/FASTQ) to train and evaluate sequence classifiers—for example viral versus prokaryotic, or phage versus bacterial. It takes reference genomes from NCBI RefSeq or user-supplied FASTA sets (bacteria, virus, archaea, plasmid), splits them into fixed- or variable-length simulated reads or contigs, and can apply sequencing-error and mutation models. Outputs are a single metagenome file with traceable read identifiers and optional ground-truth abundance. The tool is built for reproducibility (date-stamped accession snapshots and fixed seeds), rigorous train/test evaluation (temporal or random splits with similarity-based filtering to avoid leakage), handling of endogenous viral elements in non-viral genomes, structured benchmarks with fixed genome counts per category and replicates, and support for in-house genome sets without NCBI download. For workflows and commands, see [Use cases at a glance](#use-cases-at-a-glance).
 
 ---
 
 ## Table of contents
 
-- [What it does](#what-it-does)
 - [Accession snapshot](#accession-snapshot)
 - [Use cases at a glance](#use-cases-at-a-glance)
 - [Installation](#installation)
@@ -19,12 +18,6 @@ CHIMERA builds synthetic metagenome FASTA/FASTQ from NCBI RefSeq or your own gen
 - [Capabilities summary](#capabilities-summary)
 - [Project structure](#project-structure)
 - [Notes](#notes)
-
----
-
-## What it does
-
-**In short:** Reproducible runs (snapshots + seeds; optional `--max-*` subset); rigorous train/test (temporal or percentage split, BLAST-based removal of test reads similar to train); EVE handling (exclude or export); structured benchmark (fixed N per category, replicates); mutations, user viral FASTA, complete-only, abundance models, taxonomy balancing; in-house datasets (your FASTAs in `bacteria/`, `virus/`, etc.). For workflows and commands, see [Use cases at a glance](#use-cases-at-a-glance).
 
 ---
 
