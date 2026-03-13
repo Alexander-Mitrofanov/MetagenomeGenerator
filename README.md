@@ -2,7 +2,13 @@
 
 **CHIMERA:** **C**onfigurable **H**ybrid **I**n-silico **M**etagenome **E**mulator for **R**ead **A**nalysis.
 
-CHIMERA builds synthetic metagenome FASTA/FASTQ for training and evaluating sequence classifiers (e.g. viral vs. prokaryotic, phage vs. bacterial). Inputs are RefSeq or your own FASTA sets in category folders (bacteria, virus, archaea, plasmid); the pipeline splits them into fixed- or variable-length reads or contigs, applies optional error and mutation models, and writes one file with traceable read IDs and optional ground-truth abundance. It is built for reproducibility (date-stamped snapshots and fixed seeds), rigorous train/test evaluation (temporal or random splits with similarity filtering to avoid inflated metrics from near-duplicate train/test sequences), clean non-viral genomes (exclude or export EVEs so they do not bias viral classifiers), standardized benchmarks (fixed counts per category and replicates), and in-house data (your FASTAs in the right folders, no NCBI download). See [Use cases at a glance](#use-cases-at-a-glance) for workflows and commands.
+CHIMERA is a pipeline for generating synthetic metagenomic datasets in FASTA or FASTQ format for training and benchmarking sequence classifiers, such as viral vs. prokaryotic or phage vs. bacterial classifiers. It constructs artificial metagenomes from reference genomes obtained from sources such as NCBI RefSeq or from user-provided FASTA files organized into category-specific directories (e.g., bacteria, virus, archaea, plasmid).
+
+Input genomes are fragmented into reads or contigs of fixed or variable length, with optional sequencing error and mutation models applied to simulate realistic data. The resulting dataset is written as a single metagenome file in which read identifiers remain traceable to their source genomes, with optional ground-truth metadata describing dataset composition and abundance.
+
+CHIMERA is designed to support reproducible benchmarking. Genome sets can be defined using date-stamped accession snapshots, and fixed random seeds ensure deterministic read sampling across runs. The pipeline also supports strategies to reduce train–test contamination, including temporal splits based on genome release dates and similarity-based filtering of test sequences.
+
+Additional features include optional filtering of endogenous viral elements (EVEs) in microbial genomes, standardized dataset generation with fixed genome counts per category, and support for custom genome collections by simply placing FASTA files into the corresponding category folders.
 
 ---
 
