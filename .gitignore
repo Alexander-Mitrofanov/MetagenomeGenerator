@@ -28,6 +28,7 @@ output/
 output_*/
 data/
 working_directory/
+viral_reference/
 
 # Snapshot run logs (in snapshots/)
 snapshots/*.log

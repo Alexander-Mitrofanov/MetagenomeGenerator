@@ -13,10 +13,10 @@ from .accession_snapshot import get_default_snapshot_path, migrate_snapshot_to_c
 from .download_genomes import download_genomes
 from .chunk_genomes import build_metagenome, get_file_stats, split_train_test_and_write
 from .seeker_wrapper import SEEKER_MIN_LENGTH, run_seeker
-from .blastn_filter import export_eve_regions_fasta, load_eve_intervals, run_blastn_from_dirs
+from .blastn_filter import export_eve_regions_fasta, load_eve_intervals, run_blastn_from_dirs, run_build_viral_db
 from .genome_layout import validate_genome_dir
 from .similarity_filter import filter_test_against_train
-from .temporal_split import run_temporal_split, run_temporal_split_info
+from .temporal_split import run_temporal_split, run_temporal_split_info, run_temporal_split_search
 from .viral_taxonomy import run_viral_taxonomy
 from .benchmark_recipe import run_benchmark_recipe
 
@@ -477,6 +477,20 @@ def _add_pipeline_subparser(subparsers) -> None:
         help="Minimum interval length to export with --blastn-export-eve-fasta. Default: 200",
     )
     p.add_argument(
+        "--blastn-viral-db",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="BLAST DB prefix for EVE detection (e.g. from build-viral-db). If set, used instead of virus/ in downloaded genomes.",
+    )
+    p.add_argument(
+        "--blastn-viral-reference-fasta",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="FASTA of viral sequences for EVE detection. If set, makeblastdb is run and used instead of virus/ in downloaded genomes.",
+    )
+    p.add_argument(
         "--filter-similar",
         action="store_true",
         help="Filter chunks by similarity: drop sequences >=90%% similar to already-kept; oversample and refill to target.",
@@ -694,7 +708,43 @@ def _add_blastn_filter_subparser(subparsers) -> None:
         metavar="N",
         help="Minimum interval length to export with --export-eve-fasta. Default: 200",
     )
+    p.add_argument(
+        "--viral-reference-fasta",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="FASTA of viral sequences to use as BLAST DB for EVE detection (e.g. from build-viral-db). Overrides virus/ in genome-dir. Use for proper prophage/EVE detection.",
+    )
+    p.add_argument(
+        "--viral-db",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Path to existing BLAST DB prefix (e.g. from build-viral-db). Overrides virus/ in genome-dir. Use for proper prophage/EVE detection.",
+    )
     p.set_defaults(func=_run_blastn_filter)
+
+
+def _add_build_viral_db_subparser(subparsers) -> None:
+    p = subparsers.add_parser(
+        "build-viral-db",
+        help="Download all viral genomes from a snapshot and build a BLAST DB for EVE/prophage detection.",
+    )
+    p.add_argument(
+        "--accessions-file",
+        type=Path,
+        required=True,
+        metavar="PATH",
+        help="Snapshot or accessions JSON (viral list will be used; other categories ignored).",
+    )
+    p.add_argument(
+        "--output-dir",
+        type=Path,
+        required=True,
+        metavar="PATH",
+        help="Base directory; a dated subfolder viral_db_YYYY-MM-DD (snapshot date) is created here. Pass the printed DB path to blastn-filter --viral-db.",
+    )
+    p.set_defaults(func=_run_build_viral_db)
 
 
 def _add_seeker_subparser(subparsers) -> None:
@@ -815,6 +865,41 @@ def _add_temporal_split_info_subparser(subparsers) -> None:
         help="NCBI esummary batch size when metadata not in snapshot. Default: 500",
     )
     p.set_defaults(func=_run_temporal_split_info)
+
+
+def _add_temporal_split_search_subparser(subparsers) -> None:
+    p = subparsers.add_parser(
+        "temporal-split-search",
+        help="Find a split date so train set has at least N and test set at least M genomes (by CreateDate).",
+    )
+    p.add_argument(
+        "--accessions-file",
+        type=Path,
+        required=True,
+        metavar="PATH",
+        help="Input JSON (e.g. snapshot) with bacterial, viral, archaea, plasmid lists.",
+    )
+    p.add_argument(
+        "--min-train",
+        type=int,
+        required=True,
+        metavar="N",
+        help="Minimum number of genomes in the train set (CreateDate < split date).",
+    )
+    p.add_argument(
+        "--min-test",
+        type=int,
+        required=True,
+        metavar="M",
+        help="Minimum number of genomes in the test set (CreateDate >= split date).",
+    )
+    p.add_argument(
+        "--batch-size",
+        type=int,
+        default=500,
+        help="NCBI esummary batch size when metadata not in snapshot. Default: 500",
+    )
+    p.set_defaults(func=_run_temporal_split_search)
 
 
 def _add_filter_test_against_train_subparser(subparsers) -> None:
@@ -1051,6 +1136,16 @@ def _run_temporal_split_info(args) -> None:
     )
 
 
+def _run_temporal_split_search(args) -> None:
+    run_temporal_split_search(
+        args.accessions_file,
+        args.min_train,
+        args.min_test,
+        batch_size=getattr(args, "batch_size", 500),
+        verbose=True,
+    )
+
+
 def _run_download(args) -> None:
     accessions_file = getattr(args, "accessions_file", None)
     if accessions_file is not None and not accessions_file.exists():
@@ -1179,11 +1274,21 @@ def _run_blastn_filter(args) -> None:
     if not ok:
         print(f"Error: {err}", file=__import__("sys").stderr)
         raise SystemExit(1)
+    viral_ref = getattr(args, "viral_reference_fasta", None)
+    viral_db = getattr(args, "viral_db", None)
+    if viral_ref is not None and viral_db is not None:
+        raise SystemExit("Use only one of --viral-reference-fasta or --viral-db")
+    if viral_ref is not None and not viral_ref.exists():
+        raise SystemExit(f"--viral-reference-fasta not found: {viral_ref}")
+    if viral_db is not None and not viral_db.exists() and not (viral_db.parent / (viral_db.name + ".nhr")).exists():
+        raise SystemExit(f"--viral-db not found: {viral_db}")
     eve_intervals = run_blastn_from_dirs(
         args.genome_dir,
         args.out_dir,
         evalue=args.evalue,
         perc_identity=args.perc_identity,
+        viral_reference_fasta=viral_ref,
+        viral_db_prefix=viral_db,
     )
     export_path = getattr(args, "export_eve_fasta", None)
     if export_path is not None:
@@ -1195,6 +1300,12 @@ def _run_blastn_filter(args) -> None:
             export_path,
             min_interval_length=getattr(args, "export_eve_min_length", 200),
         )
+
+
+def _run_build_viral_db(args) -> None:
+    if not args.accessions_file.exists():
+        raise SystemExit(f"--accessions-file not found: {args.accessions_file}")
+    run_build_viral_db(args.accessions_file, args.output_dir)
 
 
 def _run_pipeline(args) -> None:
@@ -1263,11 +1374,17 @@ def _run_pipeline(args) -> None:
                   getattr(args, "blastn_evalue", 1e-5), getattr(args, "blastn_perc_identity", 70.0))
         blastn_out = getattr(args, "blastn_out_dir", None) or blastn_dir
         blastn_out.mkdir(parents=True, exist_ok=True)
+        bv_db = getattr(args, "blastn_viral_db", None)
+        bv_fasta = getattr(args, "blastn_viral_reference_fasta", None)
+        if bv_db is not None and bv_fasta is not None:
+            raise SystemExit("Use only one of --blastn-viral-db or --blastn-viral-reference-fasta")
         eve_intervals = run_blastn_from_dirs(
             download_dir,
             blastn_out,
             evalue=getattr(args, "blastn_evalue", 1e-5),
             perc_identity=getattr(args, "blastn_perc_identity", 70.0),
+            viral_db_prefix=bv_db,
+            viral_reference_fasta=bv_fasta,
         )
         export_path = getattr(args, "blastn_export_eve_fasta", None)
         if export_path is not None:
@@ -1441,7 +1558,7 @@ def _run_temporal_split(args) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="CHIMERA — Configurable Hybrid In-silico Metagenome Emulator for Read Analysis. Commands: download, snapshot, chunk, pipeline, blastn-filter, viral-taxonomy, seeker, temporal-split, temporal-split-info, filter-test-against-train, benchmark-recipe",
+        description="CHIMERA — Configurable Hybrid In-silico Metagenome Emulator for Read Analysis. Commands: download, snapshot, chunk, pipeline, blastn-filter, build-viral-db, viral-taxonomy, seeker, temporal-split, temporal-split-info, temporal-split-search, filter-test-against-train, benchmark-recipe",
     )
     subparsers = parser.add_subparsers(dest="command")
     subparsers.required = True
@@ -1452,9 +1569,11 @@ def main() -> None:
     _add_chunk_subparser(subparsers)
     _add_pipeline_subparser(subparsers)
     _add_blastn_filter_subparser(subparsers)
+    _add_build_viral_db_subparser(subparsers)
     _add_seeker_subparser(subparsers)
     _add_temporal_split_subparser(subparsers)
     _add_temporal_split_info_subparser(subparsers)
+    _add_temporal_split_search_subparser(subparsers)
     _add_filter_test_against_train_subparser(subparsers)
     _add_viral_taxonomy_subparser(subparsers)
     _add_benchmark_recipe_subparser(subparsers)

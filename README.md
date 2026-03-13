@@ -14,6 +14,7 @@ Additional features include optional filtering of endogenous viral elements (EVE
 
 ## Table of contents
 
+- [Pre-built snapshots and viral reference](#pre-built-snapshots-and-viral-reference)
 - [Accession snapshot](#accession-snapshot)
 - [Use cases at a glance](#use-cases-at-a-glance)
 - [Installation](#installation)
@@ -27,11 +28,26 @@ Additional features include optional filtering of endogenous viral elements (EVE
 
 ---
 
+## Pre-built snapshots and viral reference
+
+You do **not** need to build your own accession snapshot or viral reference database. This repository provides both, and they are updated regularly.
+
+- **Accession snapshots** are in the [`snapshots/`](snapshots/) directory. Use any `accession_snapshot_YYYY-MM-DD.json` with `--accessions-file` for reproducible downloads and pipelines. New snapshots are added as the RefSeq catalog is refreshed.
+- **Viral reference BLAST databases** (for EVE/prophage detection) are published in the [Releases](https://github.com/Alexander-Mitrofanov/MetagenomeGenerator/releases) section. Each release includes a date-stamped viral DB (e.g. `viral_db_YYYY-MM-DD`) built from the same snapshot date. Download the latest release asset (e.g. `viral_db_2026-03-10.tar.gz`), extract it, and pass the BLAST DB path to `blastn-filter --viral-db`. That way you can run EVE filtering without running `build-viral-db` (which downloads thousands of viral genomes and can take over an hour).
+
+If you need a custom snapshot date or a DB built from a different snapshot, use the `snapshot` and `build-viral-db` commands as described below.
+
+*Maintainers:* To publish a new viral DB, run `build-viral-db`, then create a GitHub Release and attach the dated folder as a tarball (e.g. `tar czvf viral_db_YYYY-MM-DD.tar.gz -C viral_reference viral_db_YYYY-MM-DD`).
+
+---
+
 ## Accession snapshot
 
 NCBI's RefSeq catalog changes over time (new submissions, retractions, taxonomy updates). If you search and download "N bacterial and N viral genomes" on different dates, you get different accession sets, so experiments are not reproducible. The **snapshot** command records the **current catalog** of matching accessions to a date-stamped JSON **without downloading any sequences**. That JSON is a frozen accession list: later, `download --accessions-file <json>` (or `pipeline` with the same file) fetches exactly those accessions, so the same snapshot always yields the same genome set. **Snapshot = reproducible genome selection**; **download with accessions-file = same genomes every time.**
 
-**Creating a snapshot:**
+**Using a pre-built snapshot from this repo:** Clone or download this repository and use any snapshot from the [`snapshots/`](snapshots/) directory with `--accessions-file snapshots/accession_snapshot_YYYY-MM-DD.json`. Snapshots are updated regularly, so you can use the latest without running `snapshot` yourself.
+
+**Creating your own snapshot (optional):**
 
 ```bash
 metagenome-generator snapshot
@@ -39,7 +55,7 @@ metagenome-generator snapshot
 
 The output path is **automatic**: the file is written to `snapshots/accession_snapshot_YYYY-MM-DD.json` (current date). The `snapshots/` directory is created if needed. To use a custom path, pass `--output <path>`.
 
-The command queries NCBI for all RefSeq accessions that match the chosen categories and writes them to the JSON. **It can take a long time** (tens of minutes to over an hour, depending on catalog size and rate limits), but it is **usually needed only once**—or when you want to refresh the catalog. Re-run when you need an updated list (e.g. for a new project); for the same project or paper, reuse the same snapshot file.
+The command queries NCBI for all RefSeq accessions that match the chosen categories and writes them to the JSON. **It can take a long time** (tens of minutes to over an hour, depending on catalog size and rate limits). Use a [pre-built snapshot](#pre-built-snapshots-and-viral-reference) from this repo when possible; run `snapshot` only when you need a custom date or a fresh catalog.
 
 **Snapshot contents.** The JSON contains four category lists: **bacterial**, **viral**, **archaeal**, and **plasmid**. Each list holds accession IDs (e.g. `NC_000001.1`). By default, each accession also has **create_date** (NCBI submission date, for temporal train/test splits) and **title** (genome description, for auditing). Use `--no-metadata` to store only the ID lists. Use `--complete-only` to restrict the catalog to complete genomes only; then use that snapshot with `--accessions-file` for reproducible complete-only runs.
 
@@ -58,9 +74,11 @@ The command queries NCBI for all RefSeq accessions that match the chosen categor
 | **Single metagenome** | Generate one synthetic metagenome FASTA (fixed or variable read length) for classifier training or method benchmarking, with controlled genome counts and read parameters. | `pipeline --num-bacteria N --num-virus N --output-dir out --output metagenome.fasta --sequence-length 250 --reads-per-organism 1000` |
 | **In-house genome set** | Use your own genome FASTA files (isolates, assemblies, phages) instead of NCBI: place them in `bacteria/`, `virus/`, etc., then run `chunk` with `--input` pointing to that directory. | Create folder layout → put FASTAs in the right category folders → `chunk --input my_genomes --output metagenome.fasta --output-dir out --sequence-length 250 --reads-per-organism 1000` |
 | **Reproducible genome set** | Fix the set of genomes used across runs and machines: record the catalog once with `snapshot`, then download and generate reads from that list so that results depend only on the snapshot and seeds, not on NCBI’s current state. Optionally limit to a subset with `--max-bacteria`, `--max-virus`, and `--sample-seed`. | `snapshot` → save JSON; then `download --accessions-file <json>` (and run read generation) or use that file in `pipeline`. To use a subset: add `--max-bacteria N --max-virus M --sample-seed 42`. |
-| **Temporal train/test** | Evaluate generalization to “future” genomes: train on accessions submitted before a cutoff date and test on accessions on or after that date, with BLAST-based removal of test reads that are highly similar to train (avoids inflated metrics from near-identical strains). | `temporal-split-info` → `temporal-split` → build train and test metagenomes from the two JSONs → **`filter-test-against-train`** to drop test reads similar to train. |
+| **Temporal train/test** | Evaluate generalization to “future” genomes: train on accessions submitted before a cutoff date and test on accessions on or after that date, with BLAST-based removal of test reads that are highly similar to train (avoids inflated metrics from near-identical strains). | Optional: `temporal-split-search --min-train N --min-test M` to get a split date. Then `temporal-split-info` (preview) → `temporal-split` → build train and test metagenomes → **`filter-test-against-train`**. |
 | **Single-dataset train/test** | Split one synthetic metagenome into train and test fractions (e.g. 80/20) with automatic removal of test reads that are ≥ threshold similar to train, for quick evaluation without temporal split. | `chunk` or `pipeline` with `--train-test-split 80` (similarity filter applied automatically). |
 | **Structured benchmark** | Produce multiple replicate datasets with fixed N genomes per category (e.g. 50 bacterial, 50 viral per replicate) sampled from a snapshot, for method comparison and reporting mean ± std across replicates in a standardized way. | `snapshot` → `benchmark-recipe --accessions-file <snap> --output-dir out --per-category 50 --replicates 5` |
+
+For a detailed walkthrough (temporal train/test with fixed genome counts, read budget, and similarity filter), see [Detailed Use Cases](Detailed_Use_Cases.md).
 
 ---
 
@@ -317,7 +335,16 @@ Removing test reads similar to train avoids inflated metrics from near-identical
 
 #### Temporal split (by NCBI CreateDate)
 
-1. **Preview** (no files written):
+1. **Find a split date** that gives at least N train and M test genomes (optional; use when you want fixed sizes):
+
+   ```bash
+   metagenome-generator temporal-split-search \
+     --accessions-file snapshots/accession_snapshot_YYYY-MM-DD.json \
+     --min-train 100 --min-test 20
+   ```
+   Prints a suggested `--split-date` and counts. Then use that date in the steps below.
+
+2. **Preview** counts for a chosen date (no files written):
 
    ```bash
    metagenome-generator temporal-split-info \
@@ -325,7 +352,7 @@ Removing test reads similar to train avoids inflated metrics from near-identical
      --split-date 2019-06-01
    ```
 
-2. **Write train/test JSONs:**
+3. **Write train/test JSONs:**
 
    ```bash
    metagenome-generator temporal-split \
@@ -333,9 +360,9 @@ Removing test reads similar to train avoids inflated metrics from near-identical
      --split-date 2019-06-01
    ```
 
-3. **Build train and test metagenomes:** Run `download` (or `pipeline`) twice with `--accessions-file train_<basename>.json` and `--accessions-file test_<basename>.json` into separate dirs; generate reads from each to get `train_metagenome.fasta` and `test_metagenome.fasta`.
+4. **Build train and test metagenomes:** Run `download` (or `pipeline`) twice with `--accessions-file train_<basename>.json` and `--accessions-file test_<basename>.json` into separate dirs; generate reads from each to get `train_metagenome.fasta` and `test_metagenome.fasta`.
 
-4. **Filter test against train (important for rigorous evaluation):** Remove test reads that are ≥ threshold similar to train so different strains or near-duplicates are not counted as “novel” test.
+5. **Filter test against train (important for rigorous evaluation):** Remove test reads that are ≥ threshold similar to train so different strains or near-duplicates are not counted as “novel” test.
 
    ```bash
    metagenome-generator filter-test-against-train \
@@ -367,7 +394,26 @@ Output: `metagenome_train.fasta` and `metagenome_test.fasta`. Options: `--train-
 
 EVEs in non-viral genomes can be misclassified as viral. BLAST non-viral vs virus; exclude reads/contigs overlapping hits when building the metagenome.
 
-**Standalone:**
+**Viral reference for proper prophage/EVE detection:** By default, the viral BLAST DB is built from the `virus/` folder in `--genome-dir` (i.e. only the viral genomes you downloaded for that run). Prophage/EVE regions that match viruses *not* in that set are missed. To check against the full viral catalog, use a pre-built viral DB or build one yourself:
+
+- **Pre-built (recommended):** [Pre-built viral reference DBs](#pre-built-snapshots-and-viral-reference) are available from this repository’s [Releases](https://github.com/Alexander-Mitrofanov/MetagenomeGenerator/releases) page. Download the latest `viral_db_YYYY-MM-DD.tar.gz`, extract it, then run:
+
+  ```bash
+  # After extracting the release asset (e.g. viral_db_2026-03-10/)
+  metagenome-generator blastn-filter --genome-dir output/downloaded --out-dir output/blastn \
+    --viral-db /path/to/viral_db_YYYY-MM-DD/blastn_db/viral_db
+  ```
+
+- **Build your own:** If you need a DB for a snapshot date not yet in Releases, run `build-viral-db` once (creates `viral_reference/viral_db_YYYY-MM-DD/` using the snapshot date), then pass the printed DB path to `blastn-filter --viral-db`:
+
+  ```bash
+  metagenome-generator build-viral-db --accessions-file snapshots/accession_snapshot_YYYY-MM-DD.json --output-dir viral_reference
+  metagenome-generator blastn-filter --genome-dir output/downloaded --out-dir output/blastn --viral-db viral_reference/viral_db_YYYY-MM-DD/blastn_db/viral_db
+  ```
+
+You can instead pass a FASTA of viral sequences with `--viral-reference-fasta` (the tool will run `makeblastdb` on it).
+
+**Standalone (default: viral DB from genome-dir):**
 
 ```bash
 metagenome-generator blastn-filter --genome-dir output/downloaded --out-dir output/blastn --evalue 1e-5 --perc-identity 70 \
@@ -422,10 +468,12 @@ Or add `--run-seeker` to the pipeline.
 | `pipeline` | Download + read generation (+ optional BLASTN, Seeker). |
 | `snapshot` | Save full accession catalog to JSON (no downloads). |
 | `temporal-split-info` | Show train/test counts for a split date (no files written). |
+| `temporal-split-search` | Find a split date so train set has at least N and test set at least M genomes. |
 | `temporal-split` | Write train and test accession JSONs by CreateDate. |
 | `filter-test-against-train` | Remove from test FASTA reads similar to train (BLAST). **Use after temporal split** for rigorous evaluation. |
 | `migrate-snapshot` | Convert legacy snapshot to per-category metadata format. |
-| `blastn-filter` | BLAST non-viral vs viral; EVE intervals for read generation and optional provirus/EVE FASTA. |
+| `blastn-filter` | BLAST non-viral vs viral; EVE intervals for read generation. Use `--viral-db` or `--viral-reference-fasta` for full viral catalog. |
+| `build-viral-db` | Download all viral genomes from a snapshot and build a BLAST DB for use with `blastn-filter --viral-db` (proper prophage/EVE detection). |
 | `viral-taxonomy` | Fetch viral taxonomy; write accession→group JSON for `--balance-viral-by-taxonomy`. |
 | `benchmark-recipe` | **Structured benchmark:** fixed N per category, R replicates; samples from snapshot, no NCBI search. |
 | `seeker` | Run Seeker on a metagenome FASTA. |
