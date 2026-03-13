@@ -1,8 +1,8 @@
-# MERGE
+# CHIMERA
 
-**MERGE** = **M**etagenome **E**ngine for **R**eproducible **G**eneration & **E**valuation.
+**CHIMERA** = **C**onfigurable **H**ybrid **I**n-silico **M**etagenome **E**mulator for **R**ead **A**nalysis.
 
-MERGE builds synthetic metagenome FASTA/FASTQ from NCBI RefSeq or your own genome FASTAs (bacteria, virus, archaea, plasmid). It splits genomes into fixed- or variable-length reads (or contigs), applies optional error and mutation models, and outputs one metagenome with traceable read IDs and optional ground-truth abundance—for training and evaluating sequence classifiers (e.g. viral vs. prokaryotic, phage vs. bacteria).
+CHIMERA builds synthetic metagenome FASTA/FASTQ from NCBI RefSeq or your own genome FASTAs (bacteria, virus, archaea, plasmid). It splits genomes into fixed- or variable-length reads (or contigs), applies optional error and mutation models, and outputs one metagenome with traceable read IDs and optional ground-truth abundance—for training and evaluating sequence classifiers (e.g. viral vs. prokaryotic, phage vs. bacteria).
 
 ---
 
@@ -312,7 +312,7 @@ Two workflows:
 - **Temporal split** — Split accessions by NCBI submission date; build train and test metagenomes separately; then run **`filter-test-against-train`** to remove test reads that are highly similar to train. Use when you want “train on past, test on future” (e.g. generalization to novel viruses).
 - **Percentage split** — Build one metagenome and split reads (e.g. 80% train, 20% test); the tool automatically removes from test any read ≥ threshold similar to a train read. Use for quick train/test from a single dataset.
 
-Removing test reads similar to train avoids inflated metrics from near-identical strains; MERGE supports this for both temporal and percentage split.
+Removing test reads similar to train avoids inflated metrics from near-identical strains; CHIMERA supports this for both temporal and percentage split.
 
 ---
 

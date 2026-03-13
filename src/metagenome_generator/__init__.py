@@ -1,4 +1,4 @@
-"""MERGE (Metagenome Engine for Reproducible Generation & Evaluation): build simulated metagenome FASTAs from NCBI or in-house genomes."""
+"""CHIMERA (Configurable Hybrid In-silico Metagenome Emulator for Read Analysis): build simulated metagenome FASTAs from NCBI or in-house genomes."""
 
 __version__ = "0.1.0"
 

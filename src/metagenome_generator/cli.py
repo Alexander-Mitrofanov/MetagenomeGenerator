@@ -1441,7 +1441,7 @@ def _run_temporal_split(args) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="MERGE — Metagenome Engine for Reproducible Generation & Evaluation. Commands: download, snapshot, chunk, pipeline, blastn-filter, viral-taxonomy, seeker, temporal-split, temporal-split-info, filter-test-against-train, benchmark-recipe",
+        description="CHIMERA — Configurable Hybrid In-silico Metagenome Emulator for Read Analysis. Commands: download, snapshot, chunk, pipeline, blastn-filter, viral-taxonomy, seeker, temporal-split, temporal-split-info, filter-test-against-train, benchmark-recipe",
     )
     subparsers = parser.add_subparsers(dest="command")
     subparsers.required = True
