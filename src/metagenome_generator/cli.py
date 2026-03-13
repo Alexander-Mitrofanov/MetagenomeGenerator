@@ -142,7 +142,8 @@ def _add_snapshot_subparser(subparsers) -> None:
         "--output",
         type=Path,
         default=None,
-        help="Output JSON path. Default: snapshots/accession_snapshot_YYYY-MM-DD.json (run date)",
+        metavar="PATH",
+        help="Output JSON path. Optional: if omitted, writes to snapshots/accession_snapshot_YYYY-MM-DD.json (date is auto-generated).",
     )
     p.add_argument(
         "--no-metadata",

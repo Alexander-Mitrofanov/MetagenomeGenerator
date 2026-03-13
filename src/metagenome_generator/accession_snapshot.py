@@ -259,7 +259,8 @@ def _cli(argv: list[str] | None = None) -> None:
         "--output",
         type=Path,
         default=None,
-        help="Output JSON path. Default: snapshots/accession_snapshot_YYYY-MM-DD.json (run date)",
+        metavar="PATH",
+        help="Output JSON path. Optional: if omitted, writes to snapshots/accession_snapshot_YYYY-MM-DD.json (date auto-generated).",
     )
     parser.add_argument(
         "--no-metadata",

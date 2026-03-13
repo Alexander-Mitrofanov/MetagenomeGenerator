@@ -35,8 +35,10 @@ NCBI's RefSeq catalog changes over time (new submissions, retractions, taxonomy 
 **Creating a snapshot:**
 
 ```bash
-metagenome-generator snapshot --output snapshots/accession_snapshot_2026-03-10.json
+metagenome-generator snapshot
 ```
+
+The output path is **automatic**: the file is written to `snapshots/accession_snapshot_YYYY-MM-DD.json` (current date). The `snapshots/` directory is created if needed. To use a custom path, pass `--output <path>`.
 
 The command queries NCBI for all RefSeq accessions that match the chosen categories and writes them to the JSON. **It can take a long time** (tens of minutes to over an hour, depending on catalog size and rate limits), but it is **usually needed only once**—or when you want to refresh the catalog. Re-run when you need an updated list (e.g. for a new project); for the same project or paper, reuse the same snapshot file.
 
@@ -274,7 +276,7 @@ Pipeline accepts the same read-generation options (e.g. `--train-test-split`, `-
 
 ### Accession snapshot (reference)
 
-See [Accession snapshot](#accession-snapshot) above. Command: `metagenome-generator snapshot --output <path>`. Options: `--no-metadata` (IDs only), `--complete-only`. Legacy: `metagenome-generator migrate-snapshot <path>`.
+See [Accession snapshot](#accession-snapshot) above. Command: `metagenome-generator snapshot` (writes to `snapshots/accession_snapshot_YYYY-MM-DD.json`); optional `--output <path>`. Options: `--no-metadata` (IDs only), `--complete-only`. Legacy: `metagenome-generator migrate-snapshot <path>`.
 
 ---
 
@@ -285,12 +287,12 @@ Fixed N per category (e.g. 50 bacterial, 50 viral), optional replicates; one com
 **Example:**
 
 ```bash
-# 1. Create a snapshot once (or use an existing one)
-metagenome-generator snapshot --output snapshots/accession_snapshot_2026-03-10.json
+# 1. Create a snapshot once (or use an existing one); output is snapshots/accession_snapshot_YYYY-MM-DD.json
+metagenome-generator snapshot
 
 # 2. Run the recipe: 50 bacterial + 50 viral per replicate, 5 replicates, seed 42
 metagenome-generator benchmark-recipe \
-  --accessions-file snapshots/accession_snapshot_2026-03-10.json \
+  --accessions-file snapshots/accession_snapshot_$(date +%Y-%m-%d).json \
   --output-dir benchmarks/run1 \
   --per-category 50 \
   --replicates 5 \
