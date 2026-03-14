@@ -75,7 +75,7 @@ def run_benchmark_recipe(
         from the snapshot with seed = seed + i.
       - Write sampled accessions to output_dir/replicate_XXX/accessions_sampled.json.
       - Download those genomes into output_dir/replicate_XXX/downloaded/.
-      - Chunk into output_dir/replicate_XXX/metagenome/<output_fasta_name> with seed = seed + i.
+      - Chunk into output_dir/replicate_XXX/<output_fasta_name> with seed = seed + i.
 
     Returns the list of metagenome FASTA paths (one per replicate).
     progress_callback(replicate_index, total_replicates, message) is called for progress.
@@ -97,9 +97,7 @@ def run_benchmark_recipe(
         rep_dir = output_dir / rep_name
         rep_dir.mkdir(parents=True, exist_ok=True)
         downloaded_dir = rep_dir / "downloaded"
-        metagenome_dir = rep_dir / "metagenome"
-        metagenome_dir.mkdir(parents=True, exist_ok=True)
-        out_fasta = metagenome_dir / output_fasta_name
+        out_fasta = rep_dir / output_fasta_name
 
         if progress_callback:
             progress_callback(rep_num, replicates, f"Sampling replicate {rep_num}/{replicates}")

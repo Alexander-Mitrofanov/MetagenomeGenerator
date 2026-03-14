@@ -72,7 +72,7 @@ The command queries NCBI for all RefSeq accessions that match the chosen categor
 | **Single metagenome** | Generate one synthetic metagenome FASTA (fixed or variable read length) for classifier training or method benchmarking, with controlled genome counts and read parameters. | `pipeline --num-bacteria N --num-virus N --output-dir out --output metagenome.fasta --sequence-length 250 --reads-per-organism 1000` |
 | **In-house genome set** | Use your own genome FASTA files (isolates, assemblies, phages) instead of NCBI: place them in `bacteria/`, `virus/`, etc., then run `chunk` with `--input` pointing to that directory. | Create folder layout → put FASTAs in the right category folders → `chunk --input my_genomes --output metagenome.fasta --output-dir out --sequence-length 250 --reads-per-organism 1000` |
 | **Reproducible genome set** | Fix the set of genomes used across runs and machines: record the catalog once with `snapshot`, then download and generate reads from that list so that results depend only on the snapshot and seeds, not on NCBI’s current state. Optionally limit to a subset with `--max-bacteria`, `--max-virus`, and `--sample-seed`. | `snapshot` → save JSON; then `download --accessions-file <json>` (and run read generation) or use that file in `pipeline`. To use a subset: add `--max-bacteria N --max-virus M --sample-seed 42`. |
-| **Temporal train/test** | Evaluate generalization to “future” genomes: train on accessions submitted before a cutoff date and test on accessions on or after that date, with BLAST-based removal of test reads that are highly similar to train (avoids inflated metrics from near-identical strains). | Optional: `temporal-split-search --min-train N --min-test M` to get a split date. Then `temporal-split-info` (preview) → `temporal-split` → build train and test metagenomes → **`filter-test-against-train`**. |
+| **Temporal train/test** | Evaluate generalization to “future” genomes: train on accessions submitted before a cutoff date and test on accessions on or after that date, with BLAST-based removal of test reads that are highly similar to train (avoids inflated metrics from near-identical strains). | **One shot:** `temporal-pipeline --accessions-file <snap> --split-date YYYY-MM-DD --output-dir <dir>` (includes similarity filter). Or step-by-step: `temporal-split-search` → `temporal-split` → download/chunk train and test → **`filter-test-against-train`**. |
 | **Single-dataset train/test** | Split one synthetic metagenome into train and test fractions (e.g. 80/20) with automatic removal of test reads that are ≥ threshold similar to train, for quick evaluation without temporal split. | `chunk` or `pipeline` with `--train-test-split 80` (similarity filter applied automatically). |
 | **Structured benchmark** | Produce multiple replicate datasets with fixed N genomes per category (e.g. 50 bacterial, 50 viral per replicate) sampled from a snapshot, for method comparison and reporting mean ± std across replicates in a standardized way. | `snapshot` → `benchmark-recipe --accessions-file <snap> --output-dir out --per-category 50 --replicates 5` |
 
@@ -134,7 +134,7 @@ metagenome-generator pipeline \
   --reads-per-organism 1000
 ```
 
-Result: genomes in `output/downloaded/`, metagenome FASTA in `output/metagenome/metagenome.fasta`.
+Result: genomes in `output/downloaded/`, metagenome FASTA in `output/metagenome.fasta`.
 
 **Do it in two steps (download, then generate reads):**
 
@@ -143,7 +143,7 @@ metagenome-generator download --num-bacteria 10 --num-virus 10 --output-dir outp
 metagenome-generator chunk \
   --input output/downloaded \
   --output metagenome.fasta \
-  --output-dir output/metagenome \
+  --output-dir output \
   --sequence-length 250 \
   --reads-per-organism 1000
 ```
@@ -214,7 +214,7 @@ You can skip the download step and use **your own genome FASTA files**. Use the 
 metagenome-generator chunk \
   --input my_genomes \
   --output metagenome.fasta \
-  --output-dir output/metagenome \
+  --output-dir output \
   --sequence-length 250 \
   --reads-per-organism 1000
 ```
@@ -273,7 +273,7 @@ Example: add `--error-model illumina --output-fastq --write-abundance --seed 42`
 
 ### Pipeline (download + read generation)
 
-One command to download genomes and generate reads; optionally run BLASTN (EVE) and Seeker. Layout: `output-dir/downloaded/`, `metagenome/`, `blastn/`, `seeker/`, `logs/`.
+One command to download genomes and generate reads; optionally run BLASTN (EVE) and Seeker. Layout: `output-dir/downloaded/`, `blastn/`, `seeker/`, `logs/`, and the final metagenome FASTA in `output-dir/<output>` (e.g. `output-dir/metagenome.fasta`).
 
 ```bash
 metagenome-generator pipeline \
@@ -316,7 +316,7 @@ metagenome-generator benchmark-recipe \
   --reads-per-organism 1000
 ```
 
-Output: `benchmarks/run1/replicate_001/downloaded/`, `benchmarks/run1/replicate_001/metagenome/metagenome.fasta`, and so on for `replicate_002` … `replicate_005`. Optional: `--archaea 50`, `--plasmid 50` to include archaea/plasmid in each replicate; `--output metagenome.fasta` to set the FASTA filename.
+Output: `benchmarks/run1/replicate_001/downloaded/`, `benchmarks/run1/replicate_001/metagenome.fasta`, and so on for `replicate_002` … `replicate_005`. Optional: `--archaea 50`, `--plasmid 50` to include archaea/plasmid in each replicate; `--output metagenome.fasta` to set the FASTA filename.
 
 ---
 
@@ -364,13 +364,13 @@ Removing test reads similar to train avoids inflated metrics from near-identical
 
    ```bash
    metagenome-generator filter-test-against-train \
-     --train-fasta output_train/metagenome/train_metagenome.fasta \
-     --test-fasta output_test/metagenome/test_metagenome.fasta \
-     --output output_test/metagenome/test_metagenome_filtered.fasta \
+     --train-fasta output_train/train_metagenome.fasta \
+     --test-fasta output_test/test_chunked.fasta \
+     --output output_test/test_metagenome.fasta \
      --similarity-threshold 90
    ```
 
-   Use `test_metagenome_filtered.fasta` as the test set. Options: `--min-coverage` (default 0.8), `--threads`, `--batch-size`. Requires BLAST+.
+   With `temporal-pipeline`, the output dir contains only `train_downloaded/`, `test_downloaded/`, `blastn/`, `train_metagenome.fasta`, and `test_metagenome.fasta` (filtered). For manual runs, use `--output` to place the filtered test FASTA where you want; omit it to write one folder up from the test FASTA. Options: `--min-coverage` (default 0.8), `--threads`, `--batch-size`. Requires BLAST+.
 
 ---
 
@@ -379,12 +379,13 @@ Removing test reads similar to train avoids inflated metrics from near-identical
 Build one metagenome; the tool splits reads and removes from test any read ≥ similarity threshold (default 90% identity over 80% length) to train.
 
 ```bash
-metagenome-generator chunk --input output/downloaded --output metagenome.fasta --output-dir output/metagenome \
+metagenome-generator chunk --input output/downloaded --output metagenome.fasta --output-dir output \
   --sequence-length 250 --reads-per-organism 1000 \
   --train-test-split 80 --seed 42
 ```
 
-Output: `metagenome_train.fasta` and `metagenome_test.fasta`. Options: `--train-test-similarity-threshold`, `--train-test-blast-threads`, `--train-test-blast-batch-size`. Same behavior when using `pipeline` with `--train-test-split 80`.
+
+Output: `output/metagenome_train.fasta` and `output/metagenome_test.fasta`. Options: `--train-test-similarity-threshold`, `--train-test-blast-threads`, `--train-test-blast-batch-size`. Same behavior when using `pipeline` with `--train-test-split 80`.
 
 ---
 
@@ -416,7 +417,7 @@ You can instead pass a FASTA of viral sequences with `--viral-reference-fasta` (
 ```bash
 metagenome-generator blastn-filter --genome-dir output/downloaded --out-dir output/blastn --evalue 1e-5 --perc-identity 70 \
   --export-eve-fasta output/blastn/eve_intervals.fasta --export-eve-min-length 200
-metagenome-generator chunk --input output/downloaded --output metagenome.fasta --output-dir output/metagenome \
+metagenome-generator chunk --input output/downloaded --output metagenome.fasta --output-dir output \
   --balanced --eve-intervals output/blastn/eve_intervals.json
 ```
 
@@ -438,7 +439,7 @@ metagenome-generator viral-taxonomy \
 Then run read generation with balancing:
 
 ```bash
-metagenome-generator chunk --input output/downloaded --output metagenome.fasta --output-dir output/metagenome \
+metagenome-generator chunk --input output/downloaded --output metagenome.fasta --output-dir output \
   --sequence-length 250 --reads-per-organism 1000 \
   --viral-taxonomy output/viral_taxonomy.json --balance-viral-by-taxonomy
 ```
@@ -450,7 +451,7 @@ metagenome-generator chunk --input output/downloaded --output metagenome.fasta -
 Run [Seeker](https://github.com/gussow/seeker) on the generated metagenome. Seeker must be installed in a separate conda env.
 
 ```bash
-metagenome-generator seeker --input output/metagenome/metagenome.fasta --output-dir output/seeker --conda-env seeker
+metagenome-generator seeker --input output/metagenome.fasta --output-dir output/seeker --conda-env seeker
 ```
 
 Or add `--run-seeker` to the pipeline.
@@ -468,7 +469,8 @@ Or add `--run-seeker` to the pipeline.
 | `temporal-split-info` | Show train/test counts for a split date (no files written). |
 | `temporal-split-search` | Find a split date so train set has at least N and test set at least M genomes. |
 | `temporal-split` | Write train and test accession JSONs by CreateDate. |
-| `filter-test-against-train` | Remove from test FASTA reads similar to train (BLAST). **Use after temporal split** for rigorous evaluation. |
+| `temporal-pipeline` | Full temporal run: split → download train/test → optional EVE (--viral-db) → chunk both → **similarity filter**. Output dir: `train_downloaded/`, `test_downloaded/`, `blastn/` (train + test), `train_metagenome.fasta`, `test_metagenome.fasta`. |
+| `filter-test-against-train` | Remove from test FASTA reads similar to train (BLAST). **Use after temporal split** (or use `temporal-pipeline` to run everything including this step). |
 | `migrate-snapshot` | Convert legacy snapshot to per-category metadata format. |
 | `blastn-filter` | BLAST non-viral vs viral; EVE intervals for read generation. Use `--viral-db` or `--viral-reference-fasta` for full viral catalog. |
 | `build-viral-db` | Download all viral genomes from a snapshot and build a BLAST DB for use with `blastn-filter --viral-db` (proper prophage/EVE detection). |

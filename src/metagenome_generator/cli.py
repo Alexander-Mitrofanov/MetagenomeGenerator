@@ -23,7 +23,6 @@ from .benchmark_recipe import run_benchmark_recipe
 # Organized output layout (pipeline): one root dir with step-based subdirs for easy navigation.
 OUTPUT_DIR_DOWNLOADED = "downloaded"
 OUTPUT_DIR_BLASTN = "blastn"
-OUTPUT_DIR_METAGENOME = "metagenome"
 OUTPUT_DIR_SEEKER = "seeker"
 OUTPUT_DIR_LOGS = "logs"
 
@@ -336,7 +335,7 @@ def _add_chunk_subparser(subparsers) -> None:
 def _add_pipeline_subparser(subparsers) -> None:
     p = subparsers.add_parser(
         "pipeline",
-        help="Run download + chunk (+ optional BLASTN, Seeker). Uses organized layout: output_dir/downloaded, blastn, metagenome, seeker.",
+        help="Run download + chunk (+ optional BLASTN, Seeker). Final FASTA in output-dir; layout: output_dir/downloaded/, blastn/, seeker/, logs/.",
     )
     p.add_argument(
         "--num-bacteria",
@@ -354,7 +353,7 @@ def _add_pipeline_subparser(subparsers) -> None:
         "--output-dir",
         type=Path,
         default=Path("output"),
-        help="Root output directory. Pipeline creates: downloaded/, blastn/, metagenome/, seeker/ under it. Default: output",
+        help="Root output directory. Pipeline creates: downloaded/, blastn/, seeker/, logs/; final metagenome FASTA written in this dir. Default: output",
     )
     p.add_argument(
         "--genome-dir",
@@ -367,7 +366,7 @@ def _add_pipeline_subparser(subparsers) -> None:
         "--output",
         type=str,
         default="metagenome.fasta",
-        help="Metagenome FASTA filename (written under output-dir/metagenome/). Default: metagenome.fasta",
+        help="Metagenome FASTA filename (written in output-dir). Default: metagenome.fasta",
     )
     p.add_argument(
         "--sequence-length",
@@ -924,9 +923,9 @@ def _add_filter_test_against_train_subparser(subparsers) -> None:
     p.add_argument(
         "--output",
         type=Path,
-        required=True,
+        default=None,
         metavar="PATH",
-        help="Output path for filtered test FASTA (test reads similar to train are removed).",
+        help="Output path for filtered test FASTA. Default: one folder up from test FASTA, named test_metagenome_filtered.fasta (e.g. .../temporal_100_25/test_metagenome_filtered.fasta).",
     )
     p.add_argument(
         "--similarity-threshold",
@@ -959,17 +958,47 @@ def _run_filter_test_against_train(args) -> None:
     for path in (args.train_fasta, args.test_fasta):
         if not path.exists():
             raise SystemExit(f"File not found: {path}")
+    output_path = args.output
+    if output_path is None:
+        output_path = args.test_fasta.parent.parent / "test_metagenome_filtered.fasta"
     n_removed, n_kept = filter_test_against_train(
         args.train_fasta,
         args.test_fasta,
-        args.output,
+        output_path,
         similarity_threshold=args.similarity_threshold,
         min_coverage=args.min_coverage,
         num_threads=args.threads,
         batch_size=args.batch_size,
     )
     print(f"Removed {n_removed} test reads (similar to train at >={args.similarity_threshold}%%); kept {n_kept}.")
-    print(f"Wrote filtered test to {args.output}")
+    print(f"Wrote filtered test to {output_path}")
+
+
+def _add_temporal_pipeline_subparser(subparsers) -> None:
+    p = subparsers.add_parser(
+        "temporal-pipeline",
+        help="Full temporal train/test run: split by date, download train and test, chunk both, then run similarity filter. Output dir: train_downloaded/, test_downloaded/, blastn/, train_metagenome.fasta, test_metagenome.fasta.",
+    )
+    p.add_argument("--accessions-file", type=Path, required=True, metavar="PATH", help="Snapshot or accessions JSON.")
+    p.add_argument("--split-date", type=str, required=True, metavar="YYYY-MM-DD", help="Train = CreateDate < date, test = CreateDate >= date.")
+    p.add_argument("--output-dir", type=Path, required=True, metavar="PATH", help="Base directory (e.g. working_directory/temporal_100_25).")
+    p.add_argument("--max-bacteria-train", type=int, default=100, help="Max bacterial genomes for train. Default: 100")
+    p.add_argument("--max-virus-train", type=int, default=100, help="Max viral genomes for train. Default: 100")
+    p.add_argument("--max-archaea-train", type=int, default=100, help="Max archaeal genomes for train. Default: 100")
+    p.add_argument("--max-plasmid-train", type=int, default=100, help="Max plasmid genomes for train. Default: 100")
+    p.add_argument("--max-bacteria-test", type=int, default=25, help="Max bacterial genomes for test. Default: 25")
+    p.add_argument("--max-virus-test", type=int, default=25, help="Max viral genomes for test. Default: 25")
+    p.add_argument("--max-archaea-test", type=int, default=25, help="Max archaeal genomes for test. Default: 25")
+    p.add_argument("--max-plasmid-test", type=int, default=25, help="Max plasmid genomes for test. Default: 25")
+    p.add_argument("--sample-seed", type=int, default=42, help="Seed for sampling accessions. Default: 42")
+    p.add_argument("--sequence-length", type=int, default=1000, help="Read length (nt). Default: 1000")
+    p.add_argument("--reads-per-organism", type=int, default=30, help="Reads per genome. Default: 30")
+    p.add_argument("--train-seed", type=int, default=42, help="Chunk seed for train. Default: 42")
+    p.add_argument("--test-seed", type=int, default=43, help="Chunk seed for test. Default: 43")
+    p.add_argument("--viral-db", type=Path, default=None, metavar="PATH", help="BLAST DB for EVE detection (optional). If set, blastn-filter is run on train and test before chunking.")
+    p.add_argument("--similarity-threshold", type=float, default=90.0, help="Remove test reads with identity >= this (%%). Default: 90")
+    p.add_argument("--min-coverage", type=float, default=0.8, help="Min fraction of query in alignment for similarity. Default: 0.8")
+    p.set_defaults(func=_run_temporal_pipeline)
 
 
 def _add_viral_taxonomy_subparser(subparsers) -> None:
@@ -1035,7 +1064,7 @@ def _add_benchmark_recipe_subparser(subparsers) -> None:
         type=Path,
         required=True,
         metavar="PATH",
-        help="Output directory. Creates replicate_001/, replicate_002/, ... each with downloaded/ and metagenome/.",
+        help="Output directory. Creates replicate_001/, replicate_002/, ... each with downloaded/ and the output FASTA in the replicate dir.",
     )
     p.add_argument(
         "--per-category",
@@ -1085,7 +1114,7 @@ def _add_benchmark_recipe_subparser(subparsers) -> None:
         "--output",
         type=str,
         default="metagenome.fasta",
-        help="Metagenome FASTA filename inside each replicate's metagenome/ dir. Default: metagenome.fasta",
+        help="Metagenome FASTA filename inside each replicate dir. Default: metagenome.fasta",
     )
     p.add_argument(
         "--output-fastq",
@@ -1309,10 +1338,9 @@ def _run_build_viral_db(args) -> None:
 
 
 def _run_pipeline(args) -> None:
-    base = args.output_dir
+    base = Path(args.output_dir).resolve()
     download_dir = base / OUTPUT_DIR_DOWNLOADED
     blastn_dir = base / OUTPUT_DIR_BLASTN
-    metagenome_dir = base / OUTPUT_DIR_METAGENOME
     seeker_dir = base / OUTPUT_DIR_SEEKER
     log_dir = base / OUTPUT_DIR_LOGS
 
@@ -1347,7 +1375,6 @@ def _run_pipeline(args) -> None:
             raise SystemExit(f"--accessions-file not found: {accessions_file}")
         download_dir = base / OUTPUT_DIR_DOWNLOADED
         download_dir.mkdir(parents=True, exist_ok=True)
-        metagenome_dir.mkdir(parents=True, exist_ok=True)
         plog.info("Step 1: Download genomes (num_bacteria=%s, num_virus=%s, num_archaea=%s, num_plasmid=%s)",
                   args.num_bacteria, args.num_virus, getattr(args, "num_archaea", 0), getattr(args, "num_plasmid", 0))
         download_genomes(
@@ -1365,8 +1392,6 @@ def _run_pipeline(args) -> None:
             max_plasmid=getattr(args, "max_plasmid", None),
             sample_seed=getattr(args, "sample_seed", None),
         )
-
-    metagenome_dir.mkdir(parents=True, exist_ok=True)
 
     eve_intervals = None
     if getattr(args, "run_blastn_filter", False):
@@ -1401,8 +1426,8 @@ def _run_pipeline(args) -> None:
     else:
         plog.info("Step 2: BLASTN filter (EVE removal) — skipped (use --run-blastn-filter to enable)")
 
-    plog.info("Step 3: Chunk genomes -> %s", metagenome_dir / args.output)
-    out_path = metagenome_dir / args.output
+    out_path = base / args.output
+    plog.info("Step 3: Chunk genomes -> %s", out_path)
 
     min_len = getattr(args, "min_contig_length", None)
     max_len = getattr(args, "max_contig_length", None)
@@ -1462,7 +1487,7 @@ def _run_pipeline(args) -> None:
         similarity_threshold=getattr(args, "similarity_threshold", 90.0),
         similarity_min_coverage=getattr(args, "similarity_min_coverage", 0.8),
         oversample_factor=getattr(args, "oversample_factor", 2.0),
-        similarity_work_dir=metagenome_dir / ".simfilter_work",
+        similarity_work_dir=base / ".simfilter_work",
         return_records=do_train_test_split,
         allow_ambiguous=allow_ambiguous,
         substitution_rate=sub_rate,
@@ -1484,18 +1509,18 @@ def _run_pipeline(args) -> None:
             records,
             train_test_split,
             getattr(args, "seed", None),
-            metagenome_dir,
+            base,
             output_stem,
             similarity_threshold=getattr(args, "train_test_similarity_threshold", 90.0),
             similarity_min_coverage=0.8,
-            work_dir=metagenome_dir / ".train_test_sim_work",
+            work_dir=base / ".train_test_sim_work",
             blast_batch_size=getattr(args, "train_test_blast_batch_size", 2000),
             blast_num_threads=getattr(args, "train_test_blast_threads", 4),
             write_fastq=output_fastq_flag,
         )
         ext = "fastq" if output_fastq_flag else "fasta"
-        train_path = metagenome_dir / f"{output_stem}_train.{ext}"
-        test_path = metagenome_dir / f"{output_stem}_test.{ext}"
+        train_path = base / f"{output_stem}_train.{ext}"
+        test_path = base / f"{output_stem}_test.{ext}"
         plog.info("Train-test split: train=%d -> %s, test=%d -> %s", n_train, train_path, n_test, test_path)
         print(f"Train-test split ({train_test_split}% train): wrote {n_train} to {train_path}, {n_test} to {test_path}")
         out_path = train_path
@@ -1556,9 +1581,119 @@ def _run_temporal_split(args) -> None:
         raise SystemExit(e) from e
 
 
+def _run_temporal_pipeline(args) -> None:
+    """Run full temporal workflow: split, download train/test, optional blastn, chunk both, similarity filter.
+    Final output dir: train_downloaded/, test_downloaded/, blastn/ (train + test subdirs), train_metagenome.fasta, test_metagenome.fasta.
+    """
+    from .chunk_genomes import build_metagenome
+
+    base = Path(args.output_dir).resolve()
+    if not args.accessions_file.exists():
+        raise SystemExit(f"--accessions-file not found: {args.accessions_file}")
+    base.mkdir(parents=True, exist_ok=True)
+    blastn_dir = base / "blastn"
+    blastn_dir.mkdir(parents=True, exist_ok=True)
+    train_json = blastn_dir / "train_accessions.json"
+    test_json = blastn_dir / "test_accessions.json"
+
+    # 1. Temporal split (write JSONs into blastn/ to keep base minimal)
+    print("Step 1: Temporal split by CreateDate")
+    try:
+        run_temporal_split(
+            args.accessions_file,
+            args.split_date,
+            train_json,
+            test_json,
+            batch_size=200,
+        )
+    except ValueError as e:
+        raise SystemExit(e) from e
+
+    train_downloaded = base / "train_downloaded"
+    test_downloaded = base / "test_downloaded"
+    # 2. Download train
+    print("Step 2: Download train genomes")
+    download_genomes(
+        0, 0, train_downloaded,
+        accessions_file=train_json,
+        max_bacteria=args.max_bacteria_train,
+        max_virus=args.max_virus_train,
+        max_archaea=args.max_archaea_train,
+        max_plasmid=args.max_plasmid_train,
+        sample_seed=args.sample_seed,
+    )
+    # 3. Download test
+    print("Step 3: Download test genomes")
+    download_genomes(
+        0, 0, test_downloaded,
+        accessions_file=test_json,
+        max_bacteria=args.max_bacteria_test,
+        max_virus=args.max_virus_test,
+        max_archaea=args.max_archaea_test,
+        max_plasmid=args.max_plasmid_test,
+        sample_seed=args.sample_seed,
+    )
+
+    eve_train: dict | None = None
+    eve_test: dict | None = None
+    if getattr(args, "viral_db", None) is not None and args.viral_db:
+        viral_db = Path(args.viral_db)
+        nhr = viral_db.with_suffix(".nhr") if viral_db.suffix else viral_db.parent / (viral_db.name + ".nhr")
+        if not nhr.exists():
+            raise SystemExit(f"--viral-db not found: {viral_db} (expected {nhr})")
+        print("Step 4a: BLASTN filter (train) for EVE intervals")
+        eve_train = run_blastn_from_dirs(
+            train_downloaded, blastn_dir / "train",
+            viral_db_prefix=viral_db,
+        )
+        print("Step 4b: BLASTN filter (test) for EVE intervals")
+        eve_test = run_blastn_from_dirs(
+            test_downloaded, blastn_dir / "test",
+            viral_db_prefix=viral_db,
+        )
+    else:
+        print("Step 4: BLASTN filter — skipped (use --viral-db for EVE detection)")
+
+    train_fasta = base / "train_metagenome.fasta"
+    test_fasta = base / "test_metagenome.fasta"
+    test_unfiltered = base / ".test_unfiltered.fasta"
+
+    # 5. Chunk train -> final file in base
+    print("Step 5: Chunk train metagenome")
+    build_metagenome(
+        train_downloaded,
+        train_fasta,
+        args.sequence_length,
+        args.reads_per_organism,
+        seed=args.train_seed,
+        eve_intervals=eve_train,
+    )
+    # 6. Chunk test to temp, then filter to final test file
+    print("Step 6: Chunk test metagenome")
+    build_metagenome(
+        test_downloaded,
+        test_unfiltered,
+        args.sequence_length,
+        args.reads_per_organism,
+        seed=args.test_seed,
+        eve_intervals=eve_test,
+    )
+    print("Step 7: Filter test against train (similarity)")
+    n_removed, n_kept = filter_test_against_train(
+        train_fasta,
+        test_unfiltered,
+        test_fasta,
+        similarity_threshold=args.similarity_threshold,
+        min_coverage=args.min_coverage,
+    )
+    test_unfiltered.unlink(missing_ok=True)
+    print(f"Removed {n_removed} test reads (similar to train at >={args.similarity_threshold}%%); kept {n_kept}.")
+    print(f"Temporal pipeline done. Final output: {base} (train_downloaded/, test_downloaded/, blastn/, train_metagenome.fasta, test_metagenome.fasta). Use {test_fasta} for evaluation.")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="CHIMERA — Configurable Hybrid In-silico Metagenome Emulator for Read Analysis. Commands: download, snapshot, chunk, pipeline, blastn-filter, build-viral-db, viral-taxonomy, seeker, temporal-split, temporal-split-info, temporal-split-search, filter-test-against-train, benchmark-recipe",
+        description="CHIMERA — Configurable Hybrid In-silico Metagenome Emulator for Read Analysis. Commands: download, snapshot, chunk, pipeline, blastn-filter, build-viral-db, viral-taxonomy, seeker, temporal-split, temporal-split-info, temporal-split-search, temporal-pipeline, filter-test-against-train, benchmark-recipe",
     )
     subparsers = parser.add_subparsers(dest="command")
     subparsers.required = True
@@ -1575,6 +1710,7 @@ def main() -> None:
     _add_temporal_split_info_subparser(subparsers)
     _add_temporal_split_search_subparser(subparsers)
     _add_filter_test_against_train_subparser(subparsers)
+    _add_temporal_pipeline_subparser(subparsers)
     _add_viral_taxonomy_subparser(subparsers)
     _add_benchmark_recipe_subparser(subparsers)
 
