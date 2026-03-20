@@ -291,6 +291,17 @@ def run_temporal_split_search(
     min_test: int,
     *,
     batch_size: int = ESUMMARY_BATCH_SIZE,
+    # Optional per-category minima.
+    # For test: if minima for bacteria/virus are not explicitly provided, they default
+    # to min_test (so suggested test splits don't end up with 0 viral reads).
+    min_train_bacteria: int | None = None,
+    min_train_viral: int | None = None,
+    min_train_archaea: int | None = None,
+    min_train_plasmid: int | None = None,
+    min_test_bacteria: int | None = None,
+    min_test_viral: int | None = None,
+    min_test_archaea: int | None = None,
+    min_test_plasmid: int | None = None,
     verbose: bool = True,
 ) -> dict:
     """Find a split date such that train set has at least min_train and test set at least min_test.
@@ -339,43 +350,147 @@ def run_temporal_split_search(
     best_date_iso = None
     best_train = 0
     best_test = 0
+    best_counts: dict[str, dict[str, int]] | None = None
+
+    min_train_bacteria_eff = 0 if min_train_bacteria is None else min_train_bacteria
+    min_train_viral_eff = 0 if min_train_viral is None else min_train_viral
+    min_train_archaea_eff = 0 if min_train_archaea is None else min_train_archaea
+    min_train_plasmid_eff = 0 if min_train_plasmid is None else min_train_plasmid
+
+    min_test_bacteria_eff = min_test if min_test_bacteria is None else min_test_bacteria
+    min_test_viral_eff = min_test if min_test_viral is None else min_test_viral
+    min_test_archaea_eff = 0 if min_test_archaea is None else min_test_archaea
+    min_test_plasmid_eff = 0 if min_test_plasmid is None else min_test_plasmid
+
+    # Precompute category for each accession and comparable CreateDate tuples.
+    acc_cat: dict[str, str] = {}
+    for acc in bacterial:
+        acc_cat[acc] = "bacterial"
+    for acc in viral:
+        acc_cat[acc] = "viral"
+    for acc in archaea:
+        acc_cat[acc] = "archaea"
+    for acc in plasmid:
+        acc_cat[acc] = "plasmid"
+
+    date_comp_by_acc: dict[str, tuple[int, int, int]] = {}
+    for acc, date_str in date_by_id.items():
+        if not date_str:
+            continue
+        comp = _date_to_comparable(date_str)
+        if comp != (0, 0, 0):
+            date_comp_by_acc[acc] = comp
+
     for d in unique_dates:
-        split_iso = _comparable_to_iso(d)
-        train_ids, test_ids = split_ids_by_date(all_ids, date_by_id, split_iso)
-        if len(train_ids) >= min_train and len(test_ids) >= min_test:
+        # Count train/test sizes in one pass (avoid materializing ID lists).
+        b_train = b_test = 0
+        v_train = v_test = 0
+        a_train = a_test = 0
+        p_train = p_test = 0
+        train_total = 0
+        test_total = 0
+
+        for acc in all_ids:
+            cat = acc_cat.get(acc)
+            if cat is None:
+                # Should not happen, but keep conservative behavior.
+                train_total += 1
+                continue
+
+            acc_date = date_comp_by_acc.get(acc)
+            # Missing or invalid CreateDate is counted as train (conservative).
+            is_test = acc_date is not None and acc_date >= d
+
+            if is_test:
+                test_total += 1
+                if cat == "bacterial":
+                    b_test += 1
+                elif cat == "viral":
+                    v_test += 1
+                elif cat == "archaea":
+                    a_test += 1
+                elif cat == "plasmid":
+                    p_test += 1
+            else:
+                train_total += 1
+                if cat == "bacterial":
+                    b_train += 1
+                elif cat == "viral":
+                    v_train += 1
+                elif cat == "archaea":
+                    a_train += 1
+                elif cat == "plasmid":
+                    p_train += 1
+
+        if (
+            train_total >= min_train
+            and test_total >= min_test
+            and b_test >= min_test_bacteria_eff
+            and v_test >= min_test_viral_eff
+            and a_test >= min_test_archaea_eff
+            and p_test >= min_test_plasmid_eff
+            and b_train >= min_train_bacteria_eff
+            and v_train >= min_train_viral_eff
+            and a_train >= min_train_archaea_eff
+            and p_train >= min_train_plasmid_eff
+        ):
+            split_iso = _comparable_to_iso(d)
             best_date_iso = split_iso
-            best_train = len(train_ids)
-            best_test = len(test_ids)
+            best_train = train_total
+            best_test = test_total
+            best_counts = {
+                "bacterial": {"train": b_train, "test": b_test},
+                "viral": {"train": v_train, "test": v_test},
+                "archaea": {"train": a_train, "test": a_test},
+                "plasmid": {"train": p_train, "test": p_test},
+            }
 
     if best_date_iso is None:
         raise ValueError(
-            f"No split date found with train>={min_train} and test>={min_test}. "
-            "Try lower min_train/min_test or use a snapshot with more accessions."
+            "No split date found that satisfies the requested minima. "
+            f"Total train>={min_train}, total test>={min_test}, "
+            f"test bacterial>={min_test_bacteria_eff}, test viral>={min_test_viral_eff}, "
+            f"test archaea>={min_test_archaea_eff}, test plasmid>={min_test_plasmid_eff}. "
+            "Try lowering min_test (or set explicit per-category minima), or use a snapshot with more accessions."
         )
-
-    def split_list(ids: list[str]) -> tuple[list[str], list[str]]:
-        return split_ids_by_date(ids, date_by_id, best_date_iso)
-
-    b_train, b_test = split_list(bacterial)
-    v_train, v_test = split_list(viral)
-    a_train, a_test = split_list(archaea)
-    p_train, p_test = split_list(plasmid)
+    assert best_counts is not None
 
     result = {
         "suggested_date": best_date_iso,
         "train_count": best_train,
         "test_count": best_test,
         "per_category": {
-            "bacterial": {"train": len(b_train), "test": len(b_test)},
-            "viral": {"train": len(v_train), "test": len(v_test)},
-            "archaea": {"train": len(a_train), "test": len(a_test)},
-            "plasmid": {"train": len(p_train), "test": len(p_test)},
+            "bacterial": best_counts["bacterial"],
+            "viral": best_counts["viral"],
+            "archaea": best_counts["archaea"],
+            "plasmid": best_counts["plasmid"],
+        },
+        "minima_used": {
+            "min_train": min_train,
+            "min_test": min_test,
+            "min_train_bacteria": min_train_bacteria_eff,
+            "min_train_viral": min_train_viral_eff,
+            "min_train_archaea": min_train_archaea_eff,
+            "min_train_plasmid": min_train_plasmid_eff,
+            "min_test_bacteria": min_test_bacteria_eff,
+            "min_test_viral": min_test_viral_eff,
+            "min_test_archaea": min_test_archaea_eff,
+            "min_test_plasmid": min_test_plasmid_eff,
         },
     }
 
     if verbose:
         print()
         print(f"Suggested --split-date: {best_date_iso}  (train={best_train:,}, test={best_test:,})")
+        print()
+        print("  Requested minima (effective):")
+        print("  ------------------------------")
+        print(f"  Total train         >= {min_train:,}")
+        print(f"  Total test          >= {min_test:,}")
+        print(f"  Test bacterial      >= {min_test_bacteria_eff:,}")
+        print(f"  Test viral          >= {min_test_viral_eff:,}")
+        print(f"  Test archaea        >= {min_test_archaea_eff:,}")
+        print(f"  Test plasmid        >= {min_test_plasmid_eff:,}")
         print()
         print("  Category   |   Train |    Test")
         print("  -----------+---------+--------")

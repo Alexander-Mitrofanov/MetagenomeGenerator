@@ -869,7 +869,11 @@ def _add_temporal_split_info_subparser(subparsers) -> None:
 def _add_temporal_split_search_subparser(subparsers) -> None:
     p = subparsers.add_parser(
         "temporal-split-search",
-        help="Find a split date so train set has at least N and test set at least M genomes (by CreateDate).",
+        help=(
+            "Find a split date by CreateDate such that train/test set have enough genomes. "
+            "By default (when category-specific minima are not provided), the test set must have "
+            "at least --min-test viral and at least --min-test bacterial genomes."
+        ),
     )
     p.add_argument(
         "--accessions-file",
@@ -891,6 +895,66 @@ def _add_temporal_split_search_subparser(subparsers) -> None:
         required=True,
         metavar="M",
         help="Minimum number of genomes in the test set (CreateDate >= split date).",
+    )
+    p.add_argument(
+        "--min-train-bacteria",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Optional minimum bacterial genomes in the train set (default: 0; only --min-train total enforced).",
+    )
+    p.add_argument(
+        "--min-train-virus",
+        "--min-train-viral",
+        dest="min_train_viral",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Optional minimum viral genomes in the train set (default: 0; only --min-train total enforced).",
+    )
+    p.add_argument(
+        "--min-train-archaea",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Optional minimum archaeal genomes in the train set (default: 0).",
+    )
+    p.add_argument(
+        "--min-train-plasmid",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Optional minimum plasmid genomes in the train set (default: 0).",
+    )
+    p.add_argument(
+        "--min-test-bacteria",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Optional minimum bacterial genomes in the test set (default: same as --min-test).",
+    )
+    p.add_argument(
+        "--min-test-virus",
+        "--min-test-viral",
+        dest="min_test_viral",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Optional minimum viral genomes in the test set (default: same as --min-test).",
+    )
+    p.add_argument(
+        "--min-test-archaea",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Optional minimum archaeal genomes in the test set (default: 0).",
+    )
+    p.add_argument(
+        "--min-test-plasmid",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Optional minimum plasmid genomes in the test set (default: 0).",
     )
     p.add_argument(
         "--batch-size",
@@ -1171,6 +1235,14 @@ def _run_temporal_split_search(args) -> None:
         args.min_train,
         args.min_test,
         batch_size=getattr(args, "batch_size", 500),
+        min_train_bacteria=getattr(args, "min_train_bacteria", None),
+        min_train_viral=getattr(args, "min_train_viral", None),
+        min_train_archaea=getattr(args, "min_train_archaea", None),
+        min_train_plasmid=getattr(args, "min_train_plasmid", None),
+        min_test_bacteria=getattr(args, "min_test_bacteria", None),
+        min_test_viral=getattr(args, "min_test_viral", None),
+        min_test_archaea=getattr(args, "min_test_archaea", None),
+        min_test_plasmid=getattr(args, "min_test_plasmid", None),
         verbose=True,
     )
 

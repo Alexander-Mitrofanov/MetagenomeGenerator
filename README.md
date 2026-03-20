@@ -333,7 +333,7 @@ Removing test reads similar to train avoids inflated metrics from near-identical
 
 #### Temporal split (by NCBI CreateDate)
 
-1. **Find a split date** that gives at least N train and M test genomes (optional; use when you want fixed sizes):
+1. **Find a split date** that gives at least N train (total) and M test (total) genomes. By default, the suggested test split also enforces **at least M bacterial and at least M viral** genomes (unless you override with `--min-test-bacteria/--min-test-virus`):
 
    ```bash
    metagenome-generator temporal-split-search \
@@ -365,7 +365,7 @@ Removing test reads similar to train avoids inflated metrics from near-identical
    ```bash
    metagenome-generator filter-test-against-train \
      --train-fasta output_train/train_metagenome.fasta \
-     --test-fasta output_test/test_chunked.fasta \
+      --test-fasta output_test/test_unfiltered.fasta \
      --output output_test/test_metagenome.fasta \
      --similarity-threshold 90
    ```
@@ -467,7 +467,7 @@ Or add `--run-seeker` to the pipeline.
 | `pipeline` | Download + read generation (+ optional BLASTN, Seeker). |
 | `snapshot` | Save full accession catalog to JSON (no downloads). |
 | `temporal-split-info` | Show train/test counts for a split date (no files written). |
-| `temporal-split-search` | Find a split date so train set has at least N and test set at least M genomes. |
+| `temporal-split-search` | Find a split date so train set has at least N and test set at least M genomes; by default it also requires at least M bacterial and M viral genomes in the test set (override with per-category flags). |
 | `temporal-split` | Write train and test accession JSONs by CreateDate. |
 | `temporal-pipeline` | Full temporal run: split → download train/test → optional EVE (--viral-db) → chunk both → **similarity filter**. Output dir: `train_downloaded/`, `test_downloaded/`, `blastn/` (train + test), `train_metagenome.fasta`, `test_metagenome.fasta`. |
 | `filter-test-against-train` | Remove from test FASTA reads similar to train (BLAST). **Use after temporal split** (or use `temporal-pipeline` to run everything including this step). |
