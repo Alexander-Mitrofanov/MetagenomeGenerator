@@ -1114,7 +1114,7 @@ def _run_viral_taxonomy(args) -> None:
 def _add_benchmark_recipe_subparser(subparsers) -> None:
     p = subparsers.add_parser(
         "benchmark-recipe",
-        help="Structured benchmark: fixed N genomes per category, optional replicates. Uses snapshot; no NCBI search.",
+        help="Structured benchmark: maximize diversity across replicates, and write explicit train/test FASTA/FASTQ per replicate. Uses snapshot; no NCBI search.",
     )
     p.add_argument(
         "--accessions-file",
@@ -1157,6 +1157,69 @@ def _add_benchmark_recipe_subparser(subparsers) -> None:
         help="Number of replicate benchmark datasets. Default: 5",
     )
     p.add_argument(
+        "--train-test-split",
+        type=float,
+        default=80.0,
+        metavar="PCT",
+        help="Train percentage when splitting each replicate metagenome into train/test reads (default: 80).",
+    )
+    p.add_argument(
+        "--train-test-similarity-threshold",
+        type=float,
+        default=90.0,
+        metavar="PIDENT",
+        help="Remove test reads with BLAST identity >= this (%%) versus train (default: 90).",
+    )
+    p.add_argument(
+        "--min-coverage",
+        type=float,
+        default=0.8,
+        metavar="FRAC",
+        help="Min fraction of query length aligned to count as similar for train/test filtering (default: 0.8).",
+    )
+    p.add_argument(
+        "--train-test-blast-threads",
+        type=int,
+        default=4,
+        metavar="N",
+        help="BLAST threads used during train/test similarity filtering (default: 4).",
+    )
+    p.add_argument(
+        "--train-test-blast-batch-size",
+        type=int,
+        default=2000,
+        metavar="N",
+        help="Test sequences per BLAST batch during train/test similarity filtering (default: 2000).",
+    )
+    p.add_argument(
+        "--diversity-max-attempts",
+        type=int,
+        default=3,
+        metavar="K",
+        help="How many candidate genome sets to try per replicate before choosing the most diverse one (default: 3).",
+    )
+    p.add_argument(
+        "--diversity-blast-perc-identity",
+        type=float,
+        default=90.0,
+        metavar="PIDENT",
+        help="Genome-level BLAST identity threshold for diversity scoring (default: 90).",
+    )
+    p.add_argument(
+        "--diversity-blast-min-coverage",
+        type=float,
+        default=0.8,
+        metavar="FRAC",
+        help="Genome-level BLAST min coverage fraction for diversity scoring (default: 0.8).",
+    )
+    p.add_argument(
+        "--diversity-blast-threads",
+        type=int,
+        default=4,
+        metavar="N",
+        help="BLAST threads used during diversity scoring (default: 4).",
+    )
+    p.add_argument(
         "--seed",
         type=int,
         default=42,
@@ -1178,7 +1241,7 @@ def _add_benchmark_recipe_subparser(subparsers) -> None:
         "--output",
         type=str,
         default="metagenome.fasta",
-        help="Metagenome FASTA filename inside each replicate dir. Default: metagenome.fasta",
+        help="Output stem for train/test files inside each replicate dir (e.g. metagenome.fasta -> metagenome_train.fasta + metagenome_test.fasta). Default: metagenome.fasta",
     )
     p.add_argument(
         "--output-fastq",
@@ -1212,10 +1275,19 @@ def _run_benchmark_recipe(args) -> None:
         sequence_length=args.sequence_length,
         reads_per_organism=args.reads_per_organism,
         output_fasta_name=args.output,
+        train_test_split=getattr(args, "train_test_split", 80.0),
+        train_test_similarity_threshold=getattr(args, "train_test_similarity_threshold", 90.0),
+        similarity_min_coverage=getattr(args, "min_coverage", 0.8),
+        train_test_blast_threads=getattr(args, "train_test_blast_threads", 4),
+        train_test_blast_batch_size=getattr(args, "train_test_blast_batch_size", 2000),
+        diversity_max_attempts=getattr(args, "diversity_max_attempts", 3),
+        diversity_blast_perc_identity=getattr(args, "diversity_blast_perc_identity", 90.0),
+        diversity_blast_min_coverage=getattr(args, "diversity_blast_min_coverage", 0.8),
+        diversity_blast_threads=getattr(args, "diversity_blast_threads", 4),
         progress_callback=progress,
         output_fastq=getattr(args, "output_fastq", False),
     )
-    print(f"Done. Wrote {len(paths)} replicate metagenomes to {args.output_dir}")
+    print(f"Done. Wrote {len(paths)} replicate test sets to {args.output_dir}")
     for p in paths:
         print(f"  {p}")
 

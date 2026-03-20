@@ -74,7 +74,7 @@ The command queries NCBI for all RefSeq accessions that match the chosen categor
 | **Reproducible genome set** | Fix the set of genomes used across runs and machines: record the catalog once with `snapshot`, then download and generate reads from that list so that results depend only on the snapshot and seeds, not on NCBI’s current state. Optionally limit to a subset with `--max-bacteria`, `--max-virus`, and `--sample-seed`. | `snapshot` → save JSON; then `download --accessions-file <json>` (and run read generation) or use that file in `pipeline`. To use a subset: add `--max-bacteria N --max-virus M --sample-seed 42`. |
 | **Temporal train/test** | Evaluate generalization to “future” genomes: train on accessions submitted before a cutoff date and test on accessions on or after that date, with BLAST-based removal of test reads that are highly similar to train (avoids inflated metrics from near-identical strains). | **One shot:** `temporal-pipeline --accessions-file <snap> --split-date YYYY-MM-DD --output-dir <dir>` (includes similarity filter). Or step-by-step: `temporal-split-search` → `temporal-split` → download/chunk train and test → **`filter-test-against-train`**. |
 | **Single-dataset train/test** | Split one synthetic metagenome into train and test fractions (e.g. 80/20) with automatic removal of test reads that are ≥ threshold similar to train, for quick evaluation without temporal split. | `chunk` or `pipeline` with `--train-test-split 80` (similarity filter applied automatically). |
-| **Structured benchmark** | Produce multiple replicate datasets with fixed N genomes per category (e.g. 50 bacterial, 50 viral per replicate) sampled from a snapshot, for method comparison and reporting mean ± std across replicates in a standardized way. | `snapshot` → `benchmark-recipe --accessions-file <snap> --output-dir out --per-category 50 --replicates 5` |
+| **Structured benchmark** | Produce multiple replicate datasets with fixed N genomes per category (e.g. 50 bacterial, 50 viral per replicate) sampled from a snapshot; replicates are selected to be as diverse as possible (genome-level BLAST scoring) and each replicate is split into train/test reads with similarity filtering. | `snapshot` → `benchmark-recipe --accessions-file <snap> --output-dir out --per-category 50 --replicates 5 --train-test-split 80` |
 
 For a detailed walkthrough (temporal train/test with fixed genome counts, read budget, and similarity filter), see [Detailed Use Cases](Detailed_Use_Cases.md).
 
@@ -297,7 +297,7 @@ See [Accession snapshot](#accession-snapshot) above. Command: `metagenome-genera
 
 ### Structured benchmark recipe
 
-Fixed N per category (e.g. 50 bacterial, 50 viral), optional replicates; one command, reproducible and comparable to published benchmarks. No NCBI search at recipe time—samples from your snapshot.
+Fixed N per category (e.g. 50 bacterial, 50 viral), optional replicates; one command, reproducible and comparable to published benchmarks. No NCBI search at recipe time—samples from your snapshot. Replicates are selected to be as diverse as possible (greedy genome-level BLAST scoring), and each replicate is split into train/test reads with similarity filtering.
 
 **Example:**
 
@@ -316,7 +316,22 @@ metagenome-generator benchmark-recipe \
   --reads-per-organism 1000
 ```
 
-Output: `benchmarks/run1/replicate_001/downloaded/`, `benchmarks/run1/replicate_001/metagenome.fasta`, and so on for `replicate_002` … `replicate_005`. Optional: `--archaea 50`, `--plasmid 50` to include archaea/plasmid in each replicate; `--output metagenome.fasta` to set the FASTA filename.
+Output (per replicate): `benchmarks/run1/replicate_001/downloaded/`, plus train/test read FASTAs inside the replicate directory:
+
+- `benchmarks/run1/replicate_001/metagenome_train.fasta`
+- `benchmarks/run1/replicate_001/metagenome_test.fasta`
+
+and so on for `replicate_002` … `replicate_005`.
+
+Optional: `--archaea 50`, `--plasmid 50` to include archaea/plasmid in each replicate; `--output metagenome.fasta` to set the `{output_stem}_train.*` / `{output_stem}_test.*` filenames.
+
+Train/test defaults: `--train-test-split 80`, `--train-test-similarity-threshold 90`, `--min-coverage 0.8`.
+
+Train/test similarity filtering knobs (BLAST):
+`--train-test-blast-threads`, `--train-test-blast-batch-size`.
+
+Diversity selection knobs (genome-level BLAST scoring):
+`--diversity-max-attempts`, `--diversity-blast-perc-identity`, `--diversity-blast-min-coverage`, `--diversity-blast-threads`.
 
 ---
 
@@ -484,7 +499,7 @@ Or add `--run-seeker` to the pipeline.
 | `blastn-filter` | BLAST non-viral vs viral; EVE intervals for read generation. Use `--viral-db` or `--viral-reference-fasta` for full viral catalog. |
 | `build-viral-db` | Download all viral genomes from a snapshot and build a BLAST DB for use with `blastn-filter --viral-db` (proper prophage/EVE detection). |
 | `viral-taxonomy` | Fetch viral taxonomy; write accession→group JSON for `--balance-viral-by-taxonomy`. |
-| `benchmark-recipe` | **Structured benchmark:** fixed N per category, R replicates; samples from snapshot, no NCBI search. |
+| `benchmark-recipe` | **Structured benchmark:** fixed N per category, R diverse replicates; samples from snapshot, no NCBI search. Writes `{output_stem}_train.*` and `{output_stem}_test.*` inside each `replicate_XXX/` (default train split 80%, then removes test reads similar to train). |
 | `seeker` | Run Seeker on a metagenome FASTA. |
 
 Full options: `metagenome-generator <command> --help`.
@@ -499,7 +514,7 @@ Full options: `metagenome-generator <command> --help`.
 | Read generation | Fixed/variable length; balanced or weighted; `--forbid-ambiguous`; mutation rates; Illumina-like errors; FASTQ + abundance file. |
 | Train/test | Temporal split by CreateDate or percentage split; **filter-test-against-train** / similarity filtering. |
 | EVE | BLAST non-viral vs viral; exclude or export provirus regions. |
-| Benchmark | `benchmark-recipe`: fixed N per category, R replicates; viral taxonomy balancing; extra viral FASTA; Seeker. |
+| Benchmark | `benchmark-recipe`: fixed N per category, R diverse replicates; genome-level BLAST-driven diversity; generates `{output_stem}_train.*` and `{output_stem}_test.*` with train-vs-test similarity filtering. |
 
 ---
 
