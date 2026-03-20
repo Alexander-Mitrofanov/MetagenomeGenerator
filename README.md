@@ -333,7 +333,16 @@ Removing test reads similar to train avoids inflated metrics from near-identical
 
 #### Temporal split (by NCBI CreateDate)
 
-1. **Find a split date** that gives at least N train (total) and M test (total) genomes. By default, the suggested test split also enforces **at least M bacterial and at least M viral** genomes (unless you override with `--min-test-bacteria/--min-test-virus`):
+1. **Find a split date** that gives at least N train (total) and M test (total) genomes.
+
+   By default, the suggested test split also enforces per-category minima:
+   test bacterial `>= M` and test viral `>= M` (so you don't get `0` viral reads when you only pass `--min-test`).
+
+   Optional per-category overrides (all are optional):
+   `--min-test-bacteria`, `--min-test-virus`/`--min-test-viral`, `--min-test-archaea`, `--min-test-plasmid`.
+   If you don’t set the archaea/plasmid flags, they default to `0` for the test set.
+
+   Optional train category minima are also available: `--min-train-bacteria`, `--min-train-virus`/`--min-train-viral`, `--min-train-archaea`, `--min-train-plasmid` (default `0`; only `--min-train` total is enforced by default).
 
    ```bash
    metagenome-generator temporal-split-search \
@@ -467,7 +476,7 @@ Or add `--run-seeker` to the pipeline.
 | `pipeline` | Download + read generation (+ optional BLASTN, Seeker). |
 | `snapshot` | Save full accession catalog to JSON (no downloads). |
 | `temporal-split-info` | Show train/test counts for a split date (no files written). |
-| `temporal-split-search` | Find a split date so train set has at least N and test set at least M genomes; by default it also requires at least M bacterial and M viral genomes in the test set (override with per-category flags). |
+| `temporal-split-search` | Find a split date so train set has at least N and test set at least M genomes. Default per-category minima for the test set: bacterial `>= M` and viral `>= M` (to avoid `0` viral test sets). Override with `--min-test-bacteria/--min-test-virus/--min-test-archaea/--min-test-plasmid` (archaea/plasmid default to `0` unless set). Optional train per-category minima: `--min-train-bacteria/--min-train-virus/--min-train-archaea/--min-train-plasmid`. |
 | `temporal-split` | Write train and test accession JSONs by CreateDate. |
 | `temporal-pipeline` | Full temporal run: split → download train/test → optional EVE (--viral-db) → chunk both → **similarity filter**. Output dir: `train_downloaded/`, `test_downloaded/`, `blastn/` (train + test), `train_metagenome.fasta`, `test_metagenome.fasta`. |
 | `filter-test-against-train` | Remove from test FASTA reads similar to train (BLAST). **Use after temporal split** (or use `temporal-pipeline` to run everything including this step). |
