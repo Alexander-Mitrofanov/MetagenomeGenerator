@@ -248,6 +248,11 @@ def _add_chunk_subparser(subparsers) -> None:
         help="Random seed for variable-length or cap-total-reads (reproducibility).",
     )
     p.add_argument(
+        "--random-chunking",
+        action="store_true",
+        help="For fixed-length chunking, choose a random start offset (still non-overlapping windows). Use --seed for reproducibility.",
+    )
+    p.add_argument(
         "--cap-total-reads",
         type=int,
         default=None,
@@ -414,6 +419,11 @@ def _add_pipeline_subparser(subparsers) -> None:
         type=int,
         default=None,
         help="Random seed for variable-length or cap-total-reads.",
+    )
+    p.add_argument(
+        "--random-chunking",
+        action="store_true",
+        help="For fixed-length chunks, choose a random start offset (still non-overlapping windows). Use --seed for reproducibility.",
     )
     p.add_argument(
         "--cap-total-reads",
@@ -1038,6 +1048,121 @@ def _run_filter_test_against_train(args) -> None:
     print(f"Wrote filtered test to {output_path}")
 
 
+def _add_split_metagenome_train_test_subparser(subparsers) -> None:
+    p = subparsers.add_parser(
+        "split-metagenome-train-test",
+        help="Split an existing metagenome FASTA/FASTQ into train/test with similarity-based leakage prevention.",
+    )
+    p.add_argument(
+        "--input",
+        type=Path,
+        required=True,
+        metavar="PATH",
+        help="Input metagenome file (FAST A/FASTQ).",
+    )
+    p.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help="Directory to write *_train.* and *_test.* (default: input parent).",
+    )
+    p.add_argument(
+        "--output-stem",
+        type=str,
+        default=None,
+        metavar="STEM",
+        help="Output stem for train/test files (default: input filename stem).",
+    )
+    p.add_argument(
+        "--train-test-split",
+        type=float,
+        default=80.0,
+        help="Train percentage (0-100). Default: 80",
+    )
+    p.add_argument(
+        "--similarity-threshold",
+        type=float,
+        default=90.0,
+        help="Remove test reads with BLAST identity >= this (%%). Default: 90",
+    )
+    p.add_argument(
+        "--min-coverage",
+        type=float,
+        default=0.8,
+        help="Min fraction of query length in alignment to count as similar. Default: 0.8",
+    )
+    p.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Shuffle seed for train/test selection. Default: 42",
+    )
+    p.add_argument(
+        "--threads",
+        type=int,
+        default=4,
+        help="BLAST threads. Default: 4",
+    )
+    p.add_argument(
+        "--batch-size",
+        type=int,
+        default=2000,
+        help="Test sequences per BLAST batch. Default: 2000",
+    )
+    p.add_argument(
+        "--output-fastq",
+        action="store_true",
+        help="Write FASTQ instead of FASTA (adds Illumina-like per-base qualities if needed).",
+    )
+    p.set_defaults(func=_run_split_metagenome_train_test)
+
+
+def _run_split_metagenome_train_test(args) -> None:
+    from Bio import SeqIO
+    from .chunk_genomes import add_illumina_qualities_to_record
+
+    if not args.input.exists():
+        raise SystemExit(f"--input not found: {args.input}")
+
+    out_dir: Path = args.output_dir or args.input.parent
+    out_dir.mkdir(parents=True, exist_ok=True)
+    output_stem = args.output_stem or args.input.stem
+
+    input_fmt = "fastq" if args.input.suffix.lower() in {".fastq", ".fq"} else "fasta"
+    write_fastq = bool(args.output_fastq)
+    records = list(SeqIO.parse(str(args.input), input_fmt))
+    if not records:
+        raise SystemExit(f"No records found in: {args.input}")
+
+    if write_fastq:
+        # split_train_test_and_write expects phred_quality for FASTQ output.
+        fixed: list = []
+        for rec in records:
+            if "phred_quality" not in rec.letter_annotations:
+                rec = add_illumina_qualities_to_record(rec)
+            fixed.append(rec)
+        records = fixed
+
+    split_train_test_and_write(
+        records,
+        args.train_test_split,
+        args.seed,
+        out_dir,
+        output_stem,
+        similarity_threshold=args.similarity_threshold,
+        similarity_min_coverage=args.min_coverage,
+        blast_batch_size=args.batch_size,
+        blast_num_threads=args.threads,
+        write_fastq=write_fastq,
+    )
+    ext = "fastq" if write_fastq else "fasta"
+    train_path = out_dir / f"{output_stem}_train.{ext}"
+    test_path = out_dir / f"{output_stem}_test.{ext}"
+    print(f"Wrote train: {train_path}")
+    print(f"Wrote test:  {test_path}")
+
+
 def _add_temporal_pipeline_subparser(subparsers) -> None:
     p = subparsers.add_parser(
         "temporal-pipeline",
@@ -1059,6 +1184,11 @@ def _add_temporal_pipeline_subparser(subparsers) -> None:
     p.add_argument("--reads-per-organism", type=int, default=30, help="Reads per genome. Default: 30")
     p.add_argument("--train-seed", type=int, default=42, help="Chunk seed for train. Default: 42")
     p.add_argument("--test-seed", type=int, default=43, help="Chunk seed for test. Default: 43")
+    p.add_argument(
+        "--random-chunking",
+        action="store_true",
+        help="For fixed-length chunks, use a random start offset (still non-overlapping). Use train-seed/test-seed for reproducibility.",
+    )
     p.add_argument("--viral-db", type=Path, default=None, metavar="PATH", help="BLAST DB for EVE detection (optional). If set, blastn-filter is run on train and test before chunking.")
     p.add_argument("--similarity-threshold", type=float, default=90.0, help="Remove test reads with identity >= this (%%). Default: 90")
     p.add_argument("--min-coverage", type=float, default=0.8, help="Min fraction of query in alignment for similarity. Default: 0.8")
@@ -1436,6 +1566,7 @@ def _run_chunk(args) -> None:
         error_model=getattr(args, "error_model", None),
         output_fastq=getattr(args, "output_fastq", False),
         write_abundance=getattr(args, "write_abundance", False),
+        random_chunk_start=getattr(args, "random_chunking", False),
     )
     if getattr(args, "output_fastq", False):
         out_path = out_path if out_path.suffix.lower() == ".fastq" else out_path.with_suffix(".fastq")
@@ -1644,6 +1775,7 @@ def _run_pipeline(args) -> None:
         error_model=getattr(args, "error_model", None),
         output_fastq=getattr(args, "output_fastq", False),
         write_abundance=getattr(args, "write_abundance", False),
+        random_chunk_start=getattr(args, "random_chunking", False),
     )
     output_fastq_flag = getattr(args, "output_fastq", False)
     if do_train_test_split:
@@ -1811,6 +1943,7 @@ def _run_temporal_pipeline(args) -> None:
         args.reads_per_organism,
         seed=args.train_seed,
         eve_intervals=eve_train,
+        random_chunk_start=getattr(args, "random_chunking", False),
     )
     # 6. Chunk test to temp, then filter to final test file
     print("Step 6: Chunk test metagenome")
@@ -1821,6 +1954,7 @@ def _run_temporal_pipeline(args) -> None:
         args.reads_per_organism,
         seed=args.test_seed,
         eve_intervals=eve_test,
+        random_chunk_start=getattr(args, "random_chunking", False),
     )
     print("Step 7: Filter test against train (similarity)")
     n_removed, n_kept = filter_test_against_train(
@@ -1837,7 +1971,7 @@ def _run_temporal_pipeline(args) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="CHIMERA — Configurable Hybrid In-silico Metagenome Emulator for Read Analysis. Commands: download, snapshot, chunk, pipeline, blastn-filter, build-viral-db, viral-taxonomy, seeker, temporal-split, temporal-split-info, temporal-split-search, temporal-pipeline, filter-test-against-train, benchmark-recipe",
+        description="CHIMERA — Configurable Hybrid In-silico Metagenome Emulator for Read Analysis. Commands: download, snapshot, chunk, pipeline, blastn-filter, build-viral-db, viral-taxonomy, seeker, temporal-split, temporal-split-info, temporal-split-search, temporal-pipeline, split-metagenome-train-test, filter-test-against-train, benchmark-recipe",
     )
     subparsers = parser.add_subparsers(dest="command")
     subparsers.required = True
@@ -1853,6 +1987,7 @@ def main() -> None:
     _add_temporal_split_subparser(subparsers)
     _add_temporal_split_info_subparser(subparsers)
     _add_temporal_split_search_subparser(subparsers)
+    _add_split_metagenome_train_test_subparser(subparsers)
     _add_filter_test_against_train_subparser(subparsers)
     _add_temporal_pipeline_subparser(subparsers)
     _add_viral_taxonomy_subparser(subparsers)

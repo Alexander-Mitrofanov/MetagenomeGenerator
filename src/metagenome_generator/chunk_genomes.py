@@ -270,17 +270,36 @@ def add_illumina_qualities_to_record(rec: SeqRecord) -> SeqRecord:
     return rec
 
 
-def chunk_sequence(record, prefix: str, chunk_size: int, yield_coords: bool = False):
+def chunk_sequence(
+    record,
+    prefix: str,
+    chunk_size: int,
+    yield_coords: bool = False,
+    *,
+    random_chunk_start: bool = False,
+    rng: random.Random | None = None,
+):
     """Split a sequence into non-overlapping fixed-size simulated reads.
 
     Only full-length reads are emitted (trailing remainder is dropped).
     Record id: {prefix}_read_{idx}; description includes start/end (0-based) for traceability.
     If yield_coords, yields (rec, start, end) for EVE overlap checks; else yields rec.
+
+    When random_chunk_start is True, chooses a random offset in [0, chunk_size) so
+    reads start at e.g. 17..1017 instead of always 0..1000, while still keeping
+    reads non-overlapping (step = chunk_size).
     """
     seq = record.seq
+    start_offset = 0
+    if random_chunk_start:
+        if rng is None:
+            rng = random.Random()
+        start_offset = rng.randint(0, max(0, chunk_size - 1)) if chunk_size > 0 else 0
+
     idx = 0
-    for i in range(0, len(seq) - chunk_size + 1, chunk_size):
-        start, end = i, i + chunk_size
+    start = start_offset
+    while start + chunk_size <= len(seq):
+        start, end = start, start + chunk_size
         sub = seq[start:end]
         rec = SeqRecord(
             sub,
@@ -292,6 +311,7 @@ def chunk_sequence(record, prefix: str, chunk_size: int, yield_coords: bool = Fa
         else:
             yield rec
         idx += 1
+        start += chunk_size
 
 
 def chunk_sequence_variable(
@@ -391,6 +411,7 @@ def _collect_chunks_for_file(
     indel_rate: float = 0.0,
     error_model: str | None = None,
     mutation_rng: random.Random | None = None,
+    random_chunk_start: bool = False,
 ) -> list[SeqRecord]:
     """Collect chunks for a single FASTA file (fixed- or variable-length).
 
@@ -400,6 +421,7 @@ def _collect_chunks_for_file(
     from .blastn_filter import chunk_overlaps_eve
 
     chunks: list[SeqRecord] = []
+    cat = _category_from_path(fp)
     rng = random.Random(seed) if seed is not None else None
     use_eve = eve_intervals is not None
     apply_platform = error_model and mutation_rng is not None
@@ -419,6 +441,8 @@ def _collect_chunks_for_file(
                         continue
                 else:
                     rec = item
+                # Ensure FASTA/FASTQ headers start with the category class label.
+                rec.id = f"{cat}_{rec.id}"
                 if not _is_allowed_sequence(rec, allow_ambiguous):
                     continue
                 if apply_platform:
@@ -427,7 +451,16 @@ def _collect_chunks_for_file(
                     rec = _apply_mutations_to_record(rec, substitution_rate, indel_rate, mutation_rng)
                 chunks.append(rec)
         else:
-            for i, item in enumerate(chunk_sequence(record, prefix, sequence_length, yield_coords=use_eve)):
+            for i, item in enumerate(
+                chunk_sequence(
+                    record,
+                    prefix,
+                    sequence_length,
+                    yield_coords=use_eve,
+                    random_chunk_start=random_chunk_start,
+                    rng=rng,
+                )
+            ):
                 if reads_per_organism is not None and i >= reads_per_organism:
                     break
                 if use_eve:
@@ -436,6 +469,8 @@ def _collect_chunks_for_file(
                         continue
                 else:
                     rec = item
+                # Ensure FASTA/FASTQ headers start with the category class label.
+                rec.id = f"{cat}_{rec.id}"
                 if not _is_allowed_sequence(rec, allow_ambiguous):
                     continue
                 if apply_platform:
@@ -460,6 +495,8 @@ def _collect_chunks_from_multirecord_fasta(
     substitution_rate: float = 0.0,
     indel_rate: float = 0.0,
     error_model: str | None = None,
+    category_label: str = "virus",
+    random_chunk_start: bool = False,
 ) -> list[SeqRecord]:
     """Collect chunks from a multi-record FASTA (e.g. metavirome contigs). No EVE filtering.
 
@@ -481,6 +518,7 @@ def _collect_chunks_from_multirecord_fasta(
                 record, prefix, min_length, max_length, reads_per_organism, rng=rng, yield_coords=False
             ):
                 rec = item
+                rec.id = f"{category_label}_{rec.id}"
                 if not _is_allowed_sequence(rec, allow_ambiguous):
                     continue
                 if apply_platform_here:
@@ -489,11 +527,21 @@ def _collect_chunks_from_multirecord_fasta(
                     rec = _apply_mutations_to_record(rec, substitution_rate, indel_rate, file_mutation_rng)
                 chunks.append(rec)
         else:
-            for i, rec in enumerate(chunk_sequence(record, prefix, sequence_length, yield_coords=False)):
+            for i, rec in enumerate(
+                chunk_sequence(
+                    record,
+                    prefix,
+                    sequence_length,
+                    yield_coords=False,
+                    random_chunk_start=random_chunk_start,
+                    rng=rng,
+                )
+            ):
                 if reads_per_organism is not None and i >= reads_per_organism:
                     break
                 if not _is_allowed_sequence(rec, allow_ambiguous):
                     continue
+                rec.id = f"{category_label}_{rec.id}"
                 if apply_platform_here:
                     rec = _apply_error_model_to_record(rec, error_model, file_mutation_rng)
                 elif apply_mutations:
@@ -531,6 +579,7 @@ def build_metagenome(
     error_model: str | None = None,
     output_fastq: bool = False,
     write_abundance: bool = False,
+    random_chunk_start: bool = False,
 ) -> int | tuple[int, list[SeqRecord]]:
     """Build a metagenome FASTA from input_path. Fixed-length or variable-length (min_length–max_length) contigs.
 
@@ -538,6 +587,7 @@ def build_metagenome(
     If eve_intervals is set, reads/contigs overlapping those intervals (EVE regions) are excluded.
     If error_model is set (e.g. 'illumina'), applies platform-specific position-dependent errors; else if substitution_rate or indel_rate > 0, applies uniform mutations (seed used for reproducibility; default 42).
     If output_fastq is True, writes FASTQ instead of FASTA: applies Illumina-like errors and adds position-dependent Phred quality scores per base (output path suffix becomes .fastq).
+    If random_chunk_start is True, fixed-length chunks (reads) are generated starting at a random offset (still non-overlapping) rather than always starting at position 0.
     If filter_similar is True: generate more reads than needed (oversample), filter out sequences that are
     >= similarity_threshold (default 90%%) similar to any already-kept sequence, then refill until target or max rounds.
     If return_records is True, do not write to out_path and return (count, list[SeqRecord]) for train-test split.
@@ -555,7 +605,7 @@ def build_metagenome(
     use_mutations = substitution_rate > 0 or indel_rate > 0 or bool(error_model)
     if extra_viral_fasta is not None and not extra_viral_fasta.is_file():
         raise FileNotFoundError(f"extra_viral_fasta not found or not a file: {extra_viral_fasta}")
-    if (use_mutations or output_fastq) and seed is None:
+    if (use_mutations or output_fastq or random_chunk_start) and seed is None:
         seed = 42
     mutation_rng = random.Random(seed) if use_mutations else None
 
@@ -629,6 +679,7 @@ def build_metagenome(
             indel_rate=indel_rate,
             error_model=error_model,
             mutation_rng=file_mutation_rng,
+            random_chunk_start=random_chunk_start,
         )
         all_chunks.extend(chunks)
 
@@ -646,6 +697,8 @@ def build_metagenome(
             substitution_rate=substitution_rate,
             indel_rate=indel_rate,
             error_model=error_model,
+            category_label="virus",
+            random_chunk_start=random_chunk_start,
         )
         all_chunks.extend(extra_chunks)
         logger.info("Extra viral FASTA: added %d chunks from %s", len(extra_chunks), extra_viral_fasta)
@@ -692,6 +745,7 @@ def build_metagenome(
                     indel_rate=indel_rate,
                     error_model=error_model,
                     mutation_rng=file_mutation_rng,
+                    random_chunk_start=random_chunk_start,
                 )
                 more_chunks.extend(chunks)
             if not more_chunks:
@@ -726,13 +780,22 @@ def build_metagenome(
         """Write genome_id, read_count, proportion to a tab-separated file (ground-truth for benchmarking)."""
         from collections import Counter
         counts: Counter[str] = Counter()
+        def _strip_category_label(s: str) -> str:
+            # We prefix output FASTA/FASTQ ids with the category label (e.g. "bacteria_"),
+            # but the abundance ground-truth should be keyed by the original genome prefix.
+            for cat in ("bacteria", "virus", "archaea", "plasmid"):
+                marker = f"{cat}_"
+                if s.startswith(marker):
+                    return s[len(marker):]
+            return s
+
         for rec in records:
             if "_read_" in rec.id:
-                prefix = rec.id.rsplit("_read_", 1)[0]
+                prefix = _strip_category_label(rec.id.rsplit("_read_", 1)[0])
             elif "_contig_" in rec.id:
-                prefix = rec.id.rsplit("_contig_", 1)[0]
+                prefix = _strip_category_label(rec.id.rsplit("_contig_", 1)[0])
             else:
-                prefix = rec.id.split()[0]
+                prefix = _strip_category_label(rec.id.split()[0])
             counts[prefix] += 1
         total = sum(counts.values())
         path.parent.mkdir(parents=True, exist_ok=True)
