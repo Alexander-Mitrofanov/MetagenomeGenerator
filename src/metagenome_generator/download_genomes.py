@@ -140,6 +140,11 @@ def save_accessions(
 EFETCH_BATCH_SIZE = 20
 
 
+def _is_cached_fasta(path: Path) -> bool:
+    """Return True when a previously downloaded FASTA can be reused."""
+    return path.exists() and path.is_file() and path.stat().st_size > 0
+
+
 def fetch_sequences(ids: list[str], max_retries: int = 3) -> list:
     """Fetch FASTA sequences for given IDs from NCBI. Retries on transient failures.
     Pass multiple IDs to reduce API calls; records are returned in the same order as ids.
@@ -174,22 +179,34 @@ def _download_category_batched(
     category_label: str,
 ) -> None:
     """Download genomes in batches; write one FASTA per accession, named by accession (e.g. NC_000001.1.fasta). On batch failure, fall back to per-ID fetch."""
+    skipped = 0
     for start in range(0, len(ids), EFETCH_BATCH_SIZE):
         batch = ids[start : start + EFETCH_BATCH_SIZE]
+        to_fetch: list[str] = []
+        for j, gid in enumerate(batch):
+            path = out_dir / f"{gid}.fasta"
+            if _is_cached_fasta(path):
+                skipped += 1
+                print(f"Skipping {category_label} {start + j + 1}/{len(ids)}: {gid} already present")
+                logger.info("Download skip: accession=%s origin=%s path=%s (already present)", gid, category_label, path)
+                continue
+            to_fetch.append(gid)
+        if not to_fetch:
+            continue
         try:
             time.sleep(0.4)
-            records = fetch_sequences(batch)
-            if len(records) != len(batch):
-                raise RuntimeError(f"Batch returned {len(records)} records for {len(batch)} IDs")
+            records = fetch_sequences(to_fetch)
+            if len(records) != len(to_fetch):
+                raise RuntimeError(f"Batch returned {len(records)} records for {len(to_fetch)} IDs")
             for j, rec in enumerate(records):
                 acc = rec.id.split()[0]
                 path = out_dir / f"{acc}.fasta"
-                print(f"Fetching {category_label} {start + j + 1}/{len(ids)}: {batch[j]} -> {path.name}")
-                logger.info("Download: accession=%s origin=%s path=%s", batch[j], category_label, path)
+                print(f"Fetching {category_label}: {to_fetch[j]} -> {path.name}")
+                logger.info("Download: accession=%s origin=%s path=%s", to_fetch[j], category_label, path)
                 SeqIO.write([rec], path, "fasta")
         except Exception as e:
-            for k, gid in enumerate(batch):
-                print(f"Fetching {category_label} {start + k + 1}/{len(ids)}: {gid} -> {gid}.fasta")
+            for gid in to_fetch:
+                print(f"Fetching {category_label}: {gid} -> {gid}.fasta")
                 logger.info("Download: accession=%s origin=%s", gid, category_label)
                 time.sleep(0.4)
                 try:
@@ -200,6 +217,9 @@ def _download_category_batched(
                 except Exception as e2:
                     print(f"  Warning: failed to fetch {gid}: {e2}")
                     logger.warning("Download failed: accession=%s error=%s", gid, e2)
+    if skipped:
+        print(f"Reused {skipped} existing {category_label} FASTA file(s) from {out_dir}")
+        logger.info("Download skip summary: origin=%s reused=%d", category_label, skipped)
 
 
 def download_genomes(
@@ -349,8 +369,8 @@ def _cli(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("output"),
-        help="Directory for downloaded genome FASTAs. Default: output",
+        default=Path("downloads"),
+        help="Directory for downloaded genome FASTAs. Existing FASTAs are reused and not re-downloaded. Default: downloads",
     )
     parser.add_argument(
         "--accessions-file",

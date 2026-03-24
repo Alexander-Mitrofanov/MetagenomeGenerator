@@ -60,8 +60,8 @@ def _add_download_subparser(subparsers) -> None:
     p.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("output"),
-        help="Directory for downloaded genome FASTAs. Default: output",
+        default=Path("downloads"),
+        help="Directory for downloaded genome FASTAs. Existing FASTAs are reused and not re-downloaded. Default: downloads",
     )
     p.add_argument(
         "--num-archaea",
