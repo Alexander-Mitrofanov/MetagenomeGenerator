@@ -33,7 +33,7 @@ Additional features include optional filtering of endogenous viral elements (EVE
 You do **not** need to build your own accession snapshot or viral reference database. This repository provides both, and they are updated regularly.
 
 - **Accession snapshots** are in the [`snapshots/`](snapshots/) directory. Use any `accession_snapshot_YYYY-MM-DD.json` with `--accessions-file` for reproducible downloads and pipelines. New snapshots are added as the RefSeq catalog is refreshed.
-- **Viral reference BLAST databases** (for EVE/prophage detection) are published in the [Releases](https://github.com/Alexander-Mitrofanov/MetagenomeGenerator/releases) section. Each release includes a date-stamped viral DB (e.g. `viral_db_YYYY-MM-DD`) built from the same snapshot date. Download the latest release asset (e.g. `viral_db_2026-03-10.tar.gz`), extract it, and pass the BLAST DB path to `blastn-filter --viral-db`. That way you can run EVE filtering without running `build-viral-db` (which downloads thousands of viral genomes and can take over an hour).
+- **Viral reference BLAST databases** (for EVE/prophage detection) are published in the [Releases](https://github.com/Alexander-Mitrofanov/MetagenomeGenerator/releases) section. Each release includes a date-stamped viral DB (e.g. `viral_db_YYYY-MM-DD`) built from the same snapshot date **plus** a manifest (`viral_db_manifest.json`) with per-file checksums and an aggregate DB SHA256 fingerprint. Download the release asset (e.g. `viral_db_2026-03-10.tar.gz`), extract it, and pass the BLAST DB path to `blastn-filter --viral-db`. For strict reproducibility, also pass `--viral-db-manifest` and/or `--require-viral-db-sha256`.
 
 If you need a custom snapshot date or a DB built from a different snapshot, use the `snapshot` and `build-viral-db` commands as described below.
 
@@ -424,17 +424,20 @@ EVEs in non-viral genomes can be misclassified as viral. BLAST non-viral vs viru
   ```bash
   # After extracting the release asset (e.g. viral_db_2026-03-10/)
   metagenome-generator blastn-filter --genome-dir output/downloaded --out-dir output/blastn \
-    --viral-db /path/to/viral_db_YYYY-MM-DD/blastn_db/viral_db
+    --viral-db /path/to/viral_db_YYYY-MM-DD/blastn_db/viral_db \
+    --viral-db-manifest /path/to/viral_db_YYYY-MM-DD/viral_db_manifest.json
   ```
 
-- **Build your own:** If you need a DB for a snapshot date not yet in Releases, run `build-viral-db` once (creates `viral_reference/viral_db_YYYY-MM-DD/` using the snapshot date), then pass the printed DB path to `blastn-filter --viral-db`:
+- **Build your own:** If you need a DB for a snapshot date not yet in Releases, run `build-viral-db` once (creates `viral_reference/viral_db_YYYY-MM-DD/` using the snapshot date, plus `viral_db_manifest.json`), then pass the printed DB path to `blastn-filter --viral-db`:
 
   ```bash
   metagenome-generator build-viral-db --accessions-file snapshots/accession_snapshot_YYYY-MM-DD.json --output-dir viral_reference
-  metagenome-generator blastn-filter --genome-dir output/downloaded --out-dir output/blastn --viral-db viral_reference/viral_db_YYYY-MM-DD/blastn_db/viral_db
+  metagenome-generator blastn-filter --genome-dir output/downloaded --out-dir output/blastn \
+    --viral-db viral_reference/viral_db_YYYY-MM-DD/blastn_db/viral_db \
+    --viral-db-manifest viral_reference/viral_db_YYYY-MM-DD/viral_db_manifest.json
   ```
 
-You can instead pass a FASTA of viral sequences with `--viral-reference-fasta` (the tool will run `makeblastdb` on it).
+You can instead pass a FASTA of viral sequences with `--viral-reference-fasta` (the tool will run `makeblastdb` on it). If you pin a specific DB release, use `--require-viral-db-sha256 <aggregate_sha256_from_manifest>` to hard-fail on mismatches.
 
 **Standalone (default: viral DB from genome-dir):**
 
@@ -496,8 +499,8 @@ Or add `--run-seeker` to the pipeline.
 | `temporal-pipeline` | Full temporal run: split → download train/test → optional EVE (--viral-db) → chunk both → **similarity filter**. Output dir: `train_downloaded/`, `test_downloaded/`, `blastn/` (train + test), `train_metagenome.fasta`, `test_metagenome.fasta`. |
 | `filter-test-against-train` | Remove from test FASTA reads similar to train (BLAST). **Use after temporal split** (or use `temporal-pipeline` to run everything including this step). |
 | `migrate-snapshot` | Convert legacy snapshot to per-category metadata format. |
-| `blastn-filter` | BLAST non-viral vs viral; EVE intervals for read generation. Use `--viral-db` or `--viral-reference-fasta` for full viral catalog. |
-| `build-viral-db` | Download all viral genomes from a snapshot and build a BLAST DB for use with `blastn-filter --viral-db` (proper prophage/EVE detection). |
+| `blastn-filter` | BLAST non-viral vs viral; EVE intervals for read generation. Use `--viral-db` or `--viral-reference-fasta` for full viral catalog. For pinned reproducibility: `--viral-db-manifest` and/or `--require-viral-db-sha256`. |
+| `build-viral-db` | Download all viral genomes from a snapshot and build a BLAST DB for use with `blastn-filter --viral-db` (proper prophage/EVE detection). Also writes `viral_db_manifest.json` with checksums and aggregate fingerprint. |
 | `viral-taxonomy` | Fetch viral taxonomy; write accession→group JSON for `--balance-viral-by-taxonomy`. |
 | `benchmark-recipe` | **Structured benchmark:** fixed N per category, R diverse replicates; samples from snapshot, no NCBI search. Writes `{output_stem}_train.*` and `{output_stem}_test.*` inside each `replicate_XXX/` (default train split 80%, then removes test reads similar to train). |
 | `seeker` | Run Seeker on a metagenome FASTA. |

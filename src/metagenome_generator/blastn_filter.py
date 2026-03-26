@@ -12,6 +12,7 @@ RefSeq viral from a snapshot). Use build-viral-db to create it, then pass
 """
 
 import json
+import hashlib
 import logging
 import subprocess
 import time
@@ -37,6 +38,99 @@ def _merge_intervals(intervals: list[tuple[int, int]]) -> list[tuple[int, int]]:
         else:
             merged.append([s, e])
     return [(a, b) for a, b in merged]
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _blast_db_files(db_prefix: Path) -> list[Path]:
+    files = sorted(p for p in db_prefix.parent.glob(f"{db_prefix.name}.*") if p.is_file())
+    if not files:
+        raise FileNotFoundError(f"No BLAST DB files found for prefix: {db_prefix}")
+    return files
+
+
+def viral_db_fingerprint(db_prefix: Path) -> str:
+    """Stable aggregate fingerprint over all BLAST DB files for db_prefix."""
+    files = _blast_db_files(db_prefix)
+    h = hashlib.sha256()
+    for fp in files:
+        h.update(f"{fp.name}:{_sha256_file(fp)}\n".encode("utf-8"))
+    return h.hexdigest()
+
+
+def write_viral_db_manifest(
+    db_prefix: Path,
+    manifest_path: Path,
+    *,
+    snapshot_timestamp: str | None = None,
+    snapshot_date: str | None = None,
+    source_snapshot: str | None = None,
+    viral_accession_count: int | None = None,
+) -> Path:
+    """Write manifest JSON for a viral BLAST DB with per-file checksums + aggregate fingerprint."""
+    files = _blast_db_files(db_prefix)
+    file_checksums = {fp.name: _sha256_file(fp) for fp in files}
+    fp_hash = viral_db_fingerprint(db_prefix)
+    payload = {
+        "created_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "db_prefix": str(db_prefix),
+        "db_name": db_prefix.name,
+        "db_directory": str(db_prefix.parent),
+        "snapshot_timestamp": snapshot_timestamp or "",
+        "snapshot_date": snapshot_date or "",
+        "source_snapshot": source_snapshot or "",
+        "viral_accession_count": int(viral_accession_count) if viral_accession_count is not None else None,
+        "aggregate_sha256": fp_hash,
+        "file_sha256": file_checksums,
+    }
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    with manifest_path.open("w") as f:
+        json.dump(payload, f, indent=2)
+    return manifest_path
+
+
+def verify_viral_db(
+    db_prefix: Path,
+    *,
+    manifest_path: Path | None = None,
+    required_aggregate_sha256: str | None = None,
+) -> None:
+    """Validate DB exists and optionally matches manifest and/or explicit aggregate fingerprint."""
+    files = _blast_db_files(db_prefix)
+    _ = files  # non-empty assertion via helper
+    if manifest_path is not None:
+        if not manifest_path.exists():
+            raise FileNotFoundError(f"Viral DB manifest not found: {manifest_path}")
+        with manifest_path.open() as f:
+            manifest = json.load(f)
+        file_sha = manifest.get("file_sha256", {})
+        for fp in files:
+            expected = file_sha.get(fp.name)
+            if not expected:
+                raise ValueError(f"Manifest missing checksum for DB file: {fp.name}")
+            observed = _sha256_file(fp)
+            if observed != expected:
+                raise ValueError(
+                    f"Viral DB checksum mismatch for {fp.name}: expected {expected}, got {observed}"
+                )
+        expected_agg = manifest.get("aggregate_sha256")
+        observed_agg = viral_db_fingerprint(db_prefix)
+        if expected_agg and observed_agg != expected_agg:
+            raise ValueError(
+                f"Viral DB aggregate checksum mismatch: expected {expected_agg}, got {observed_agg}"
+            )
+    if required_aggregate_sha256:
+        observed_agg = viral_db_fingerprint(db_prefix)
+        if observed_agg != required_aggregate_sha256:
+            raise ValueError(
+                f"Viral DB fingerprint mismatch: expected {required_aggregate_sha256}, got {observed_agg}"
+            )
 
 
 def build_viral_db(viral_fasta: Path, db_dir: Path) -> Path:
@@ -173,6 +267,8 @@ def run_blastn_from_dirs(
     max_target_seqs: int = 5,
     viral_reference_fasta: Path | None = None,
     viral_db_prefix: Path | None = None,
+    viral_db_manifest: Path | None = None,
+    required_viral_db_sha256: str | None = None,
 ) -> dict[tuple[str, str], list[tuple[int, int]]]:
     """Run BLASTN: non-viral (bacteria/, archaea/, plasmid/) vs viral DB.
 
@@ -197,6 +293,11 @@ def run_blastn_from_dirs(
         nhr = db_prefix.with_suffix(".nhr") if db_prefix.suffix else db_prefix.parent / (db_prefix.name + ".nhr")
         if not nhr.exists():
             raise FileNotFoundError(f"BLAST DB not found at {viral_db_prefix} (expected {nhr})")
+        verify_viral_db(
+            db_prefix,
+            manifest_path=viral_db_manifest,
+            required_aggregate_sha256=required_viral_db_sha256,
+        )
         logger.info("BLASTN filter: using existing viral DB at %s", db_prefix)
         print(f"Using existing viral BLAST DB: {db_prefix}")
     elif viral_reference_fasta is not None:
@@ -380,7 +481,18 @@ def run_build_viral_db(accessions_file: Path, output_dir: Path) -> Path:
     _concat_viral_fasta(work_dir, viral_ref_fasta)
     db_dir = work_dir / "blastn_db"
     db_prefix = build_viral_db(viral_ref_fasta, db_dir)
+    manifest_path = work_dir / "viral_db_manifest.json"
+    write_viral_db_manifest(
+        db_prefix,
+        manifest_path,
+        snapshot_timestamp=ts,
+        snapshot_date=date_str,
+        source_snapshot=str(accessions_file),
+        viral_accession_count=len(viral_ids),
+    )
     logger.info("Viral BLAST DB built at %s (snapshot date %s)", db_prefix, date_str)
     print(f"Viral reference BLAST DB: {db_prefix}")
+    print(f"Viral DB manifest: {manifest_path}")
+    print(f"Viral DB aggregate SHA256: {viral_db_fingerprint(db_prefix)}")
     print(f"Use with: metagenome-generator blastn-filter --genome-dir <nonviral_dir> --out-dir <out> --viral-db {db_prefix}")
     return db_prefix
