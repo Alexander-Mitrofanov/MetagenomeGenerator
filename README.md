@@ -82,10 +82,16 @@ For a detailed walkthrough (temporal train/test with fixed genome counts, read b
 
 ## Installation
 
-**From PyPI** (when published):
+**From PyPI**:
 
 ```bash
-pip install metagenome-generator
+pip install chimera-metagenome-generator
+```
+
+CLI command after install remains:
+
+```bash
+metagenome-generator --help
 ```
 
 **From source:**
@@ -273,7 +279,7 @@ Example: add `--error-model illumina --output-fastq --write-abundance --seed 42`
 
 ### Pipeline (download + read generation)
 
-One command to download genomes and generate reads; optionally run BLASTN (EVE) and Seeker. Layout: `output-dir/downloaded/`, `blastn/`, `seeker/`, `logs/`, and the final metagenome FASTA in `output-dir/<output>` (e.g. `output-dir/metagenome.fasta`).
+One command to download genomes and generate reads; optionally run BLASTN (EVE). Layout: `output-dir/downloaded/`, `blastn/`, `logs/`, and the final metagenome FASTA in `output-dir/<output>` (e.g. `output-dir/metagenome.fasta`).
 
 ```bash
 metagenome-generator pipeline \
@@ -285,7 +291,7 @@ metagenome-generator pipeline \
   --reads-per-organism 1000
 ```
 
-Pipeline accepts the same read-generation options (e.g. `--train-test-split`, `--balanced`, `--eve-intervals`) plus `--run-blastn-filter`, `--run-seeker`, `--accessions-file`, `--complete-only`. See `metagenome-generator pipeline --help`.
+Pipeline accepts the same read-generation options (e.g. `--train-test-split`, `--balanced`, `--eve-intervals`) plus `--run-blastn-filter`, `--accessions-file`, `--complete-only`. See `metagenome-generator pipeline --help`.
 
 ---
 
@@ -473,25 +479,13 @@ metagenome-generator chunk --input output/downloaded --output metagenome.fasta -
 
 ---
 
-### Seeker (phage/bacteria prediction)
-
-Run [Seeker](https://github.com/gussow/seeker) on the generated metagenome. Seeker must be installed in a separate conda env.
-
-```bash
-metagenome-generator seeker --input output/metagenome.fasta --output-dir output/seeker --conda-env seeker
-```
-
-Or add `--run-seeker` to the pipeline.
-
----
-
 ## Command reference
 
 | Command | Purpose |
 |---------|--------|
 | `download` | Download genomes from NCBI into category folders. |
 | `chunk` | Generate reads from genome FASTAs and write one metagenome FASTA (or FASTQ). |
-| `pipeline` | Download + read generation (+ optional BLASTN, Seeker). |
+| `pipeline` | Download + read generation (+ optional BLASTN). |
 | `snapshot` | Save full accession catalog to JSON (no downloads). |
 | `temporal-split-info` | Show train/test counts for a split date (no files written). |
 | `temporal-split-search` | Find a split date so train set has at least N and test set at least M genomes. Default per-category minima for the test set: bacterial `>= M` and viral `>= M` (to avoid `0` viral test sets). Override with `--min-test-bacteria/--min-test-virus/--min-test-archaea/--min-test-plasmid` (archaea/plasmid default to `0` unless set). Optional train per-category minima: `--min-train-bacteria/--min-train-virus/--min-train-archaea/--min-train-plasmid`. |
@@ -503,7 +497,6 @@ Or add `--run-seeker` to the pipeline.
 | `build-viral-db` | Download all viral genomes from a snapshot and build a BLAST DB for use with `blastn-filter --viral-db` (proper prophage/EVE detection). Also writes `viral_db_manifest.json` with checksums and aggregate fingerprint. |
 | `viral-taxonomy` | Fetch viral taxonomy; write accession→group JSON for `--balance-viral-by-taxonomy`. |
 | `benchmark-recipe` | **Structured benchmark:** fixed N per category, R diverse replicates; samples from snapshot, no NCBI search. Writes `{output_stem}_train.*` and `{output_stem}_test.*` inside each `replicate_XXX/` (default train split 80%, then removes test reads similar to train). |
-| `seeker` | Run Seeker on a metagenome FASTA. |
 
 Full options: `metagenome-generator <command> --help`.
 
@@ -542,7 +535,6 @@ MetagenomeGenerator/
 │   ├── temporal_split.py
 │   ├── viral_taxonomy.py
 │   ├── benchmark_recipe.py
-│   └── seeker_wrapper.py
 ├── snapshots/
 └── working_directory/
 ```
