@@ -76,7 +76,7 @@ The command queries NCBI for all RefSeq accessions that match the chosen categor
 | **Single-dataset train/test** | Split one synthetic metagenome into train and test fractions (e.g. 80/20) with automatic removal of test reads that are ≥ threshold similar to train, for quick evaluation without temporal split. | `chunk` or `pipeline` with `--train-test-split 80` (similarity filter applied automatically). |
 | **Structured benchmark** | Produce multiple replicate datasets with fixed N genomes per category (e.g. 50 bacterial, 50 viral per replicate) sampled from a snapshot; replicates are selected to be as diverse as possible (genome-level BLAST scoring) and each replicate is split into train/test reads with similarity filtering. | `snapshot` → `benchmark-recipe --accessions-file <snap> --output-dir out --per-category 50 --replicates 5 --train-test-split 80` |
 
-For a detailed walkthrough (temporal train/test with fixed genome counts, read budget, and similarity filter), see [Detailed Use Cases](Detailed_Use_Cases.md).
+For a detailed end-user walkthrough (including temporal 100/25 benchmark workflow, read budget rationale, and similarity filtering), see the [User Guide](USER_GUIDE.md).
 
 ---
 

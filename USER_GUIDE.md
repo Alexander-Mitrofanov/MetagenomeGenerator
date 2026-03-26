@@ -384,6 +384,68 @@ metagenome-generator split-metagenome-train-test \
 
 ---
 
+## 6F) Worked example: temporal 100/25 benchmark set
+
+This is the most commonly requested evaluation setup and replaces the old standalone
+`Detailed_Use_Cases.md` scenario.
+
+### Objective
+
+Build a temporal dataset with:
+
+- Train: 100 genomes per category (bacteria, virus, archaea, plasmid) from genomes before 2025.
+- Test: 25 genomes per category from genomes in 2025 and later.
+- Read length: 1000 nt.
+- Minimum train read budget: at least 10,000 reads.
+- Leakage control: remove test reads highly similar to train.
+- Single output root folder under `working_directory/`.
+
+### Recommended one-shot command
+
+Use `temporal-pipeline` unless you explicitly need every intermediate command:
+
+```bash
+metagenome-generator temporal-pipeline \
+  --accessions-file snapshots/accession_snapshot_2026-03-10.json \
+  --split-date 2025-01-01 \
+  --output-dir working_directory/temporal_100_25 \
+  --max-bacteria-train 100 --max-virus-train 100 --max-archaea-train 100 --max-plasmid-train 100 \
+  --max-bacteria-test 25 --max-virus-test 25 --max-archaea-test 25 --max-plasmid-test 25 \
+  --sequence-length 1000 \
+  --reads-per-organism 30 \
+  --sample-seed 42 --train-seed 42 --test-seed 43 \
+  --viral-db /path/to/viral_db_YYYY-MM-DD/blastn_db/viral_db \
+  --viral-db-manifest /path/to/viral_db_YYYY-MM-DD/viral_db_manifest.json
+```
+
+### Why this satisfies the objective
+
+- `100 + 100 + 100 + 100 = 400` train genomes.
+- `reads-per-organism 30` gives up to ~12,000 reads before any exclusions, so it generally meets the `>=10,000` target.
+- Temporal split at `2025-01-01` enforces “train on older / test on newer”.
+- Built-in train/test similarity filtering removes near-duplicate leakage.
+
+### Expected final outputs
+
+- `working_directory/temporal_100_25/train_downloaded/`
+- `working_directory/temporal_100_25/test_downloaded/`
+- `working_directory/temporal_100_25/blastn/`
+- `working_directory/temporal_100_25/train_metagenome.fasta`
+- `working_directory/temporal_100_25/test_metagenome.fasta`
+
+### Equivalent modular command chain (advanced users)
+
+Only use this if you want manual control per step:
+
+1. `temporal-split`
+2. `download` train (max 100/category)
+3. `download` test (max 25/category)
+4. `blastn-filter` train and test (optional but recommended)
+5. `chunk` train and test (test to temporary unfiltered FASTA)
+6. `filter-test-against-train`
+
+---
+
 ## 7) EVE/Prophage Filtering and Viral DB Pinning
 
 EVE filtering is crucial when non-viral genomes may contain viral-like regions that can bias classifiers.
