@@ -7,6 +7,3 @@ dependencies:
   - python>=3.8
   - biopython>=1.83
   - blast
-  - pip
-  - pip:
-      - seeker

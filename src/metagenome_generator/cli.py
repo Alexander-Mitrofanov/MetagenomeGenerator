@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-"""Unified CLI for the metagenome simulator.
-
-Subcommands: download, snapshot, migrate-snapshot, chunk, pipeline, blastn-filter, seeker, temporal-split, temporal-split-info.
-"""
+"""Unified CLI for the metagenome simulator."""
 
 import argparse
 import logging
@@ -12,7 +9,6 @@ from pathlib import Path
 from .accession_snapshot import get_default_snapshot_path, migrate_snapshot_to_categories, run_snapshot
 from .download_genomes import download_genomes
 from .chunk_genomes import build_metagenome, get_file_stats, split_train_test_and_write
-from .seeker_wrapper import SEEKER_MIN_LENGTH, run_seeker
 from .blastn_filter import export_eve_regions_fasta, load_eve_intervals, run_blastn_from_dirs, run_build_viral_db
 from .genome_layout import validate_genome_dir
 from .similarity_filter import filter_test_against_train
@@ -23,7 +19,6 @@ from .benchmark_recipe import run_benchmark_recipe
 # Organized output layout (pipeline): one root dir with step-based subdirs for easy navigation.
 OUTPUT_DIR_DOWNLOADED = "downloaded"
 OUTPUT_DIR_BLASTN = "blastn"
-OUTPUT_DIR_SEEKER = "seeker"
 OUTPUT_DIR_LOGS = "logs"
 
 
@@ -340,7 +335,7 @@ def _add_chunk_subparser(subparsers) -> None:
 def _add_pipeline_subparser(subparsers) -> None:
     p = subparsers.add_parser(
         "pipeline",
-        help="Run download + chunk (+ optional BLASTN, Seeker). Final FASTA in output-dir; layout: output_dir/downloaded/, blastn/, seeker/, logs/.",
+        help="Run download + chunk (+ optional BLASTN). Final FASTA in output-dir; layout: output_dir/downloaded/, blastn/, logs/.",
     )
     p.add_argument(
         "--num-bacteria",
@@ -358,7 +353,7 @@ def _add_pipeline_subparser(subparsers) -> None:
         "--output-dir",
         type=Path,
         default=Path("output"),
-        help="Root output directory. Pipeline creates: downloaded/, blastn/, seeker/, logs/; final metagenome FASTA written in this dir. Default: output",
+        help="Root output directory. Pipeline creates: downloaded/, blastn/, logs/; final metagenome FASTA written in this dir. Default: output",
     )
     p.add_argument(
         "--genome-dir",
@@ -430,23 +425,6 @@ def _add_pipeline_subparser(subparsers) -> None:
         type=int,
         default=None,
         help="Downsample metagenome to this many reads.",
-    )
-    p.add_argument(
-        "--run-seeker",
-        action="store_true",
-        help="After building the metagenome FASTA, run Seeker (predict-metagenome) on it",
-    )
-    p.add_argument(
-        "--seeker-conda-env",
-        type=str,
-        default="seeker",
-        help="Conda env name to run Seeker in (used via `conda run -n ...`). Default: seeker",
-    )
-    p.add_argument(
-        "--seeker-threshold",
-        type=float,
-        default=0.5,
-        help="Score threshold for exporting predicted phage reads. Default: 0.5",
     )
     p.add_argument(
         "--run-blastn-filter",
@@ -782,56 +760,6 @@ def _add_build_viral_db_subparser(subparsers) -> None:
         help="Base directory; a dated subfolder viral_db_YYYY-MM-DD (snapshot date) is created here. Includes blastn_db/ and viral_db_manifest.json for pinned reproducibility.",
     )
     p.set_defaults(func=_run_build_viral_db)
-
-
-def _add_seeker_subparser(subparsers) -> None:
-    p = subparsers.add_parser(
-        "seeker",
-        help="Run Seeker (predict-metagenome) on a metagenome FASTA",
-    )
-    p.add_argument(
-        "--input",
-        type=Path,
-        required=True,
-        help="Input metagenome FASTA (e.g. output from chunk or pipeline)",
-    )
-    p.add_argument(
-        "--output-dir",
-        type=Path,
-        default=Path("output"),
-        help="Directory to write Seeker outputs. Default: output",
-    )
-    p.add_argument(
-        "--threshold",
-        type=float,
-        default=0.5,
-        help="Score threshold for exporting predicted phage reads (0-1). Default: 0.5",
-    )
-    p.add_argument(
-        "--conda-env",
-        type=str,
-        default="seeker",
-        help="Conda env name to run Seeker in (used via `conda run -n ...`). Default: seeker",
-    )
-    p.add_argument(
-        "--predictions-tsv",
-        type=str,
-        default=None,
-        help="Filename for Seeker predictions TSV (name/prediction/score). Default: derived from input",
-    )
-    p.add_argument(
-        "--phage-fasta",
-        type=str,
-        default=None,
-        help="Filename for FASTA of reads with score >= threshold. Default: derived from input",
-    )
-    p.add_argument(
-        "--min-length",
-        type=int,
-        default=200,
-        help="Filter out reads shorter than this before running Seeker (Seeker requires >=200). Default: 200",
-    )
-    p.set_defaults(func=_run_seeker)
 
 
 def _add_temporal_split_subparser(subparsers) -> None:
@@ -1666,7 +1594,6 @@ def _run_pipeline(args) -> None:
     base = Path(args.output_dir).resolve()
     download_dir = base / OUTPUT_DIR_DOWNLOADED
     blastn_dir = base / OUTPUT_DIR_BLASTN
-    seeker_dir = base / OUTPUT_DIR_SEEKER
     log_dir = base / OUTPUT_DIR_LOGS
 
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -1867,34 +1794,7 @@ def _run_pipeline(args) -> None:
         plog.info("Chunk step: wrote %d sequences to %s", count, out_path)
         print(f"Wrote {count} sequences to {out_path}")
 
-    if args.run_seeker:
-        plog.info("Step 4: Seeker (phage prediction) -> %s", seeker_dir)
-        seeker_dir.mkdir(parents=True, exist_ok=True)
-        run_seeker(
-            out_path,
-            seeker_dir,
-            threshold=args.seeker_threshold,
-            conda_env=args.seeker_conda_env,
-            min_length=SEEKER_MIN_LENGTH,
-        )
-    else:
-        plog.info("Step 4: Seeker (phage prediction) — skipped (use --run-seeker to enable)")
     plog.info("Pipeline finished. Log file: %s", log_file.resolve())
-
-
-def _run_seeker(args) -> None:
-    try:
-        run_seeker(
-            args.input,
-            args.output_dir,
-            threshold=args.threshold,
-            conda_env=args.conda_env or None,
-            predictions_tsv=args.predictions_tsv,
-            phage_fasta=args.phage_fasta,
-            min_length=args.min_length,
-        )
-    except (FileNotFoundError, RuntimeError) as e:
-        raise SystemExit(e) from e
 
 
 def _run_temporal_split(args) -> None:
@@ -2039,7 +1939,7 @@ def _run_temporal_pipeline(args) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="CHIMERA — Configurable Hybrid In-silico Metagenome Emulator for Read Analysis. Commands: download, snapshot, chunk, pipeline, blastn-filter, build-viral-db, viral-taxonomy, seeker, temporal-split, temporal-split-info, temporal-split-search, temporal-pipeline, split-metagenome-train-test, filter-test-against-train, benchmark-recipe",
+        description="CHIMERA — Configurable Hybrid In-silico Metagenome Emulator for Read Analysis. Commands: download, snapshot, chunk, pipeline, blastn-filter, build-viral-db, viral-taxonomy, temporal-split, temporal-split-info, temporal-split-search, temporal-pipeline, split-metagenome-train-test, filter-test-against-train, benchmark-recipe",
     )
     subparsers = parser.add_subparsers(dest="command")
     subparsers.required = True
@@ -2051,7 +1951,6 @@ def main() -> None:
     _add_pipeline_subparser(subparsers)
     _add_blastn_filter_subparser(subparsers)
     _add_build_viral_db_subparser(subparsers)
-    _add_seeker_subparser(subparsers)
     _add_temporal_split_subparser(subparsers)
     _add_temporal_split_info_subparser(subparsers)
     _add_temporal_split_search_subparser(subparsers)
