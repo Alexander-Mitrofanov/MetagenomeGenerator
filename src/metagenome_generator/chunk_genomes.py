@@ -161,6 +161,18 @@ ILLUMINA_BASE_ERROR = 0.001   # ~0.1% at start of read
 ILLUMINA_END_ERROR = 0.012    # ~1.2% toward end (typical for 250 bp)
 
 
+def normalize_train_split_percent(train_split: float) -> float:
+    """Normalize train split to percentage points.
+
+    Accepts either:
+    - percentage in [0, 100], e.g. 80
+    - fraction in (0, 1], e.g. 0.8 (interpreted as 80%)
+    """
+    if 0.0 < train_split <= 1.0:
+        return train_split * 100.0
+    return train_split
+
+
 def _apply_illumina_like_errors(
     seq_str: str,
     rng: random.Random,
@@ -848,6 +860,7 @@ def split_train_test_and_write(
 
     if not records:
         return 0, 0
+    train_pct = normalize_train_split_percent(train_pct)
     train_pct = max(0.0, min(100.0, train_pct))
     n_train_target = max(1, int(len(records) * train_pct / 100.0))
     n_test_target = len(records) - n_train_target
@@ -995,7 +1008,7 @@ def _cli(argv: list[str] | None = None) -> None:
         type=float,
         default=None,
         metavar="PCT",
-        help="Split output into train and test: PCT%% train, rest test (e.g. 80). Test sequences similar to train are removed. Writes {output_stem}_train.fasta and {output_stem}_test.fasta.",
+        help="Split output into train and test: accepts train percentage (e.g. 80) or fraction (e.g. 0.8). Test sequences similar to train are removed. Writes {output_stem}_train.fasta and {output_stem}_test.fasta.",
     )
     parser.add_argument(
         "--train-test-similarity-threshold",
@@ -1081,9 +1094,10 @@ def _cli(argv: list[str] | None = None) -> None:
     if do_train_test_split:
         _count, records = result
         output_stem = Path(args.output).stem
+        train_split_pct = normalize_train_split_percent(args.train_test_split)
         n_train, n_test = split_train_test_and_write(
             records,
-            args.train_test_split,
+            train_split_pct,
             args.seed,
             args.output_dir,
             output_stem,
@@ -1094,7 +1108,7 @@ def _cli(argv: list[str] | None = None) -> None:
         ext = "fastq" if output_fastq_flag else "fasta"
         train_path = args.output_dir / f"{output_stem}_train.{ext}"
         test_path = args.output_dir / f"{output_stem}_test.{ext}"
-        print(f"Train-test split ({args.train_test_split}% train): wrote {n_train} to {train_path}, {n_test} to {test_path}")
+        print(f"Train-test split ({train_split_pct}% train): wrote {n_train} to {train_path}, {n_test} to {test_path}")
     else:
         count = result
         if output_fastq_flag:

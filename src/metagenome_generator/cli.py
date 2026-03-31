@@ -8,7 +8,12 @@ from pathlib import Path
 
 from .accession_snapshot import get_default_snapshot_path, migrate_snapshot_to_categories, run_snapshot
 from .download_genomes import download_genomes
-from .chunk_genomes import build_metagenome, get_file_stats, split_train_test_and_write
+from .chunk_genomes import (
+    build_metagenome,
+    get_file_stats,
+    normalize_train_split_percent,
+    split_train_test_and_write,
+)
 from .blastn_filter import export_eve_regions_fasta, load_eve_intervals, run_blastn_from_dirs, run_build_viral_db
 from .genome_layout import validate_genome_dir
 from .similarity_filter import filter_test_against_train
@@ -450,6 +455,25 @@ def _add_pipeline_subparser(subparsers) -> None:
         help="BLASTN percent identity threshold. Default: 70",
     )
     p.add_argument(
+        "--blastn-threads",
+        type=int,
+        default=4,
+        metavar="N",
+        help="BLASTN threads for EVE detection. Default: 4",
+    )
+    p.add_argument(
+        "--blastn-task",
+        type=str,
+        choices=["blastn", "megablast", "dc-megablast"],
+        default="dc-megablast",
+        help="BLAST task for EVE detection. Default: dc-megablast",
+    )
+    p.add_argument(
+        "--blastn-force-recompute",
+        action="store_true",
+        help="Force rerun BLASTN for EVE detection (ignore cached eve_intervals.json metadata match).",
+    )
+    p.add_argument(
         "--blastn-export-eve-fasta",
         type=Path,
         default=None,
@@ -519,7 +543,7 @@ def _add_pipeline_subparser(subparsers) -> None:
         type=float,
         default=None,
         metavar="PCT",
-        help="Split metagenome into train (PCT%%) and test; remove from test sequences similar to train. Writes {stem}_train.fasta and {stem}_test.fasta.",
+        help="Split metagenome into train and test; accepts train percentage (e.g. 80) or fraction (e.g. 0.8). Removes from test sequences similar to train. Writes {stem}_train.fasta and {stem}_test.fasta.",
     )
     p.add_argument(
         "--train-test-similarity-threshold",
@@ -694,6 +718,25 @@ def _add_blastn_filter_subparser(subparsers) -> None:
         type=float,
         default=70.0,
         help="BLASTN percent identity. Default: 70",
+    )
+    p.add_argument(
+        "--threads",
+        type=int,
+        default=4,
+        metavar="N",
+        help="BLASTN threads for EVE detection. Default: 4",
+    )
+    p.add_argument(
+        "--task",
+        type=str,
+        choices=["blastn", "megablast", "dc-megablast"],
+        default="dc-megablast",
+        help="BLAST task for EVE detection. Default: dc-megablast",
+    )
+    p.add_argument(
+        "--force-recompute",
+        action="store_true",
+        help="Force rerun BLASTN (ignore cached eve_intervals.json metadata match).",
     )
     p.add_argument(
         "--export-eve-fasta",
@@ -1034,7 +1077,7 @@ def _add_split_metagenome_train_test_subparser(subparsers) -> None:
         "--train-test-split",
         type=float,
         default=80.0,
-        help="Train percentage (0-100). Default: 80",
+        help="Train split; accepts percentage (0-100, e.g. 80) or fraction (0-1, e.g. 0.8). Default: 80",
     )
     p.add_argument(
         "--similarity-threshold",
@@ -1100,9 +1143,10 @@ def _run_split_metagenome_train_test(args) -> None:
             fixed.append(rec)
         records = fixed
 
+    train_split_pct = normalize_train_split_percent(args.train_test_split)
     split_train_test_and_write(
         records,
-        args.train_test_split,
+        train_split_pct,
         args.seed,
         out_dir,
         output_stem,
@@ -1146,6 +1190,19 @@ def _add_temporal_pipeline_subparser(subparsers) -> None:
         help="For fixed-length chunks, use a random start offset (still non-overlapping). Use train-seed/test-seed for reproducibility.",
     )
     p.add_argument("--viral-db", type=Path, default=None, metavar="PATH", help="BLAST DB for EVE detection (optional). If set, blastn-filter is run on train and test before chunking.")
+    p.add_argument("--blastn-threads", type=int, default=4, metavar="N", help="BLASTN threads for EVE detection in temporal pipeline. Default: 4")
+    p.add_argument(
+        "--blastn-task",
+        type=str,
+        choices=["blastn", "megablast", "dc-megablast"],
+        default="dc-megablast",
+        help="BLAST task for EVE detection in temporal pipeline. Default: dc-megablast",
+    )
+    p.add_argument(
+        "--blastn-force-recompute",
+        action="store_true",
+        help="Force rerun BLASTN EVE detection in temporal pipeline (ignore cache).",
+    )
     p.add_argument(
         "--viral-db-manifest",
         type=Path,
@@ -1261,7 +1318,7 @@ def _add_benchmark_recipe_subparser(subparsers) -> None:
         type=float,
         default=80.0,
         metavar="PCT",
-        help="Train percentage when splitting each replicate metagenome into train/test reads (default: 80).",
+        help="Train split when splitting each replicate metagenome into train/test reads; accepts percentage (e.g. 80) or fraction (e.g. 0.8). Default: 80.",
     )
     p.add_argument(
         "--train-test-similarity-threshold",
@@ -1364,6 +1421,7 @@ def _run_benchmark_recipe(args) -> None:
     def progress(rep_num: int, total: int, msg: str) -> None:
         print(f"  [{rep_num}/{total}] {msg}", flush=True)
 
+    train_split_pct = normalize_train_split_percent(getattr(args, "train_test_split", 80.0))
     paths = run_benchmark_recipe(
         args.accessions_file,
         args.output_dir,
@@ -1375,7 +1433,7 @@ def _run_benchmark_recipe(args) -> None:
         sequence_length=args.sequence_length,
         reads_per_organism=args.reads_per_organism,
         output_fasta_name=args.output,
-        train_test_split=getattr(args, "train_test_split", 80.0),
+        train_test_split=train_split_pct,
         train_test_similarity_threshold=getattr(args, "train_test_similarity_threshold", 90.0),
         similarity_min_coverage=getattr(args, "min_coverage", 0.8),
         train_test_blast_threads=getattr(args, "train_test_blast_threads", 4),
@@ -1567,10 +1625,13 @@ def _run_blastn_filter(args) -> None:
         args.out_dir,
         evalue=args.evalue,
         perc_identity=args.perc_identity,
+        num_threads=getattr(args, "threads", 4),
+        task=getattr(args, "task", "dc-megablast"),
         viral_reference_fasta=viral_ref,
         viral_db_prefix=viral_db,
         viral_db_manifest=getattr(args, "viral_db_manifest", None),
         required_viral_db_sha256=getattr(args, "require_viral_db_sha256", None),
+        reuse_cache=not getattr(args, "force_recompute", False),
     )
     export_path = getattr(args, "export_eve_fasta", None)
     if export_path is not None:
@@ -1668,10 +1729,13 @@ def _run_pipeline(args) -> None:
             blastn_out,
             evalue=getattr(args, "blastn_evalue", 1e-5),
             perc_identity=getattr(args, "blastn_perc_identity", 70.0),
+            num_threads=getattr(args, "blastn_threads", 4),
+            task=getattr(args, "blastn_task", "dc-megablast"),
             viral_db_prefix=bv_db,
             viral_reference_fasta=bv_fasta,
             viral_db_manifest=bv_manifest,
             required_viral_db_sha256=bv_sha,
+            reuse_cache=not getattr(args, "blastn_force_recompute", False),
         )
         export_path = getattr(args, "blastn_export_eve_fasta", None)
         if export_path is not None:
@@ -1712,7 +1776,12 @@ def _run_pipeline(args) -> None:
         print(f"  Balanced: using {reads_per_organism} reads per file.")
 
     filter_similar = getattr(args, "filter_similar", False)
-    train_test_split = getattr(args, "train_test_split", None)
+    train_test_split_raw = getattr(args, "train_test_split", None)
+    train_test_split = (
+        normalize_train_split_percent(train_test_split_raw)
+        if train_test_split_raw is not None
+        else None
+    )
     do_train_test_split = train_test_split is not None
     if filter_similar:
         plog.info("Similarity filter enabled: threshold=%.1f%%, min_coverage=%.2f, oversample_factor=%.1f",
@@ -1887,6 +1956,9 @@ def _run_temporal_pipeline(args) -> None:
             viral_db_prefix=viral_db,
             viral_db_manifest=viral_db_manifest,
             required_viral_db_sha256=required_sha,
+            num_threads=getattr(args, "blastn_threads", 4),
+            task=getattr(args, "blastn_task", "dc-megablast"),
+            reuse_cache=not getattr(args, "blastn_force_recompute", False),
         )
         print("Step 4b: BLASTN filter (test) for EVE intervals")
         eve_test = run_blastn_from_dirs(
@@ -1894,6 +1966,9 @@ def _run_temporal_pipeline(args) -> None:
             viral_db_prefix=viral_db,
             viral_db_manifest=viral_db_manifest,
             required_viral_db_sha256=required_sha,
+            num_threads=getattr(args, "blastn_threads", 4),
+            task=getattr(args, "blastn_task", "dc-megablast"),
+            reuse_cache=not getattr(args, "blastn_force_recompute", False),
         )
     else:
         print("Step 4: BLASTN filter — skipped (use --viral-db for EVE detection)")

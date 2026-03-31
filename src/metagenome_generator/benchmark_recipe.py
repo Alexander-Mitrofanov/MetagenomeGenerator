@@ -26,7 +26,7 @@ from .download_genomes import (
     load_accessions,
     save_accessions,
 )
-from .chunk_genomes import build_metagenome, split_train_test_and_write
+from .chunk_genomes import build_metagenome, normalize_train_split_percent, split_train_test_and_write
 from .genome_layout import (
     ARCHAEA_DIR,
     BACTERIA_DIR,
@@ -321,6 +321,7 @@ def run_benchmark_recipe(
     Returns the list of test FASTA/FASTQ paths (one per replicate).
     progress_callback(replicate_index, total_replicates, message) is called for progress.
     """
+    train_test_split = normalize_train_split_percent(train_test_split)
     if per_category < 1:
         raise ValueError("per_category must be >= 1")
     if replicates < 1:

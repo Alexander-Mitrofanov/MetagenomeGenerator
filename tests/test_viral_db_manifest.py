@@ -54,3 +54,55 @@ def test_verify_detects_checksum_mismatch(tmp_path: Path):
     with pytest.raises(ValueError):
         bf.verify_viral_db(db_prefix, manifest_path=manifest)
 
+
+def test_run_blastn_from_dirs_reuses_eve_cache(tmp_path: Path, monkeypatch):
+    genome_dir = tmp_path / "genomes"
+    (genome_dir / "bacteria").mkdir(parents=True, exist_ok=True)
+    (genome_dir / "bacteria" / "B1.fasta").write_text(">B1\n" + ("ACGT" * 50) + "\n")
+    out_dir = tmp_path / "out"
+
+    db_prefix = tmp_path / "blastn_db" / "viral_db"
+    _make_fake_db(db_prefix)
+
+    calls = {"n": 0}
+
+    def _fake_run_blastn(query_fasta: Path, _db_prefix: Path, out_tsv: Path, **_kwargs):
+        calls["n"] += 1
+        out_tsv.parent.mkdir(parents=True, exist_ok=True)
+        # qseqid must match the FASTA record id ("B1")
+        out_tsv.write_text("B1\tV1\t99.0\t100\t0\t0\t1\t100\t1\t100\t1e-20\t200\n")
+
+    monkeypatch.setattr(bf, "run_blastn", _fake_run_blastn)
+
+    first = bf.run_blastn_from_dirs(
+        genome_dir,
+        out_dir,
+        viral_db_prefix=db_prefix,
+        perc_identity=70.0,
+        evalue=1e-5,
+        num_threads=2,
+        task="dc-megablast",
+        reuse_cache=True,
+    )
+    assert first
+    assert calls["n"] == 1
+    assert (out_dir / "eve_intervals.json").exists()
+    assert (out_dir / "eve_cache_meta.json").exists()
+
+    # If cache works, this replacement should never be called.
+    def _should_not_run(*_args, **_kwargs):
+        raise AssertionError("run_blastn should not execute on cache hit")
+
+    monkeypatch.setattr(bf, "run_blastn", _should_not_run)
+    second = bf.run_blastn_from_dirs(
+        genome_dir,
+        out_dir,
+        viral_db_prefix=db_prefix,
+        perc_identity=70.0,
+        evalue=1e-5,
+        num_threads=2,
+        task="dc-megablast",
+        reuse_cache=True,
+    )
+    assert second == first
+

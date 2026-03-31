@@ -261,7 +261,7 @@ metagenome-generator chunk \
 | `--abundance-distribution` | **Per-genome abundance model.** Set to `exponential` to assign each genome a weight from an exponential distribution (then normalized). Produces a few “abundant” and many “rare” genomes, similar to real communities. Use `--seed` for reproducibility. |
 | `--viral-taxonomy`, `--balance-viral-by-taxonomy` | **Taxonomy-aware viral balancing.** `--viral-taxonomy` is the path to the JSON from the `viral-taxonomy` command (viral accession → taxonomy group). With `--balance-viral-by-taxonomy`, viral read limits are set so each taxonomy group (e.g. family) contributes equally. Use to avoid a few viral families dominating and to better train on under-represented groups. |
 | `--filter-similar` | **Within-metagenome similarity filter.** Remove any read that is ≥90% similar (identity and coverage) to a read already kept. The tool oversamples and refills to try to reach the target count. Use to reduce near-duplicate sequences in a single metagenome. |
-| `--train-test-split` | **Train/test split with similarity filter.** Percentage of reads for training (e.g. 80). Outputs `*_train.fasta` and `*_test.fasta`. Any test read that is ≥ similarity threshold (default 90% identity over 80% length) to a train read is removed. Use for quick evaluation from one metagenome while avoiding inflated metrics from near-duplicate train/test pairs. |
+| `--train-test-split` | **Train/test split with similarity filter.** Accepts train split as percentage (e.g. `80`) or fraction (e.g. `0.8`, interpreted as 80%). Outputs `*_train.fasta` and `*_test.fasta`. Any test read that is ≥ similarity threshold (default 90% identity over 80% length) to a train read is removed. Use for quick evaluation from one metagenome while avoiding inflated metrics from near-duplicate train/test pairs. |
 
 **Read and contig IDs; traceability.** Fixed-length segments are named **reads** (`{accession}_read_{idx}`); variable-length segments are **contigs** (`{accession}_contig_{idx}`). The FASTA/FASTQ description includes **`start=` and `end=`** (0-based positions on the source genome) so you can trace each read or contig back to its origin. With accession-named genome files (e.g. `NC_000001.1.fasta`), the prefix in the ID is the accession.
 
@@ -406,7 +406,7 @@ Removing test reads similar to train avoids inflated metrics from near-identical
 
 #### Percentage split with similarity check (single metagenome)
 
-Build one metagenome; the tool splits reads and removes from test any read ≥ similarity threshold (default 90% identity over 80% length) to train.
+Build one metagenome; the tool splits reads and removes from test any read ≥ similarity threshold (default 90% identity over 80% length) to train. `--train-test-split` accepts either `80` or `0.8` for an 80/20 split.
 
 ```bash
 metagenome-generator chunk --input output/downloaded --output metagenome.fasta --output-dir output \
@@ -415,7 +415,7 @@ metagenome-generator chunk --input output/downloaded --output metagenome.fasta -
 ```
 
 
-Output: `output/metagenome_train.fasta` and `output/metagenome_test.fasta`. Options: `--train-test-similarity-threshold`, `--train-test-blast-threads`, `--train-test-blast-batch-size`. Same behavior when using `pipeline` with `--train-test-split 80`.
+Output: `output/metagenome_train.fasta` and `output/metagenome_test.fasta`. The initial split follows the requested ratio (e.g. 80/20). After similarity filtering, test can become smaller if near-duplicate reads are removed; if none are removed, final files keep the requested ratio. Options: `--train-test-similarity-threshold`, `--train-test-blast-threads`, `--train-test-blast-batch-size`. Same behavior when using `pipeline` with `--train-test-split 80` (or `0.8`).
 
 ---
 
@@ -454,7 +454,14 @@ metagenome-generator chunk --input output/downloaded --output metagenome.fasta -
   --balanced --eve-intervals output/blastn/eve_intervals.json
 ```
 
-**In pipeline:** add `--run-blastn-filter`; optional `--blastn-evalue`, `--blastn-perc-identity`, `--blastn-export-eve-fasta`, `--blastn-export-eve-min-length`. Requires BLAST+.
+**In pipeline:** add `--run-blastn-filter`; optional `--blastn-evalue`, `--blastn-perc-identity`, `--blastn-threads`, `--blastn-task`, `--blastn-export-eve-fasta`, `--blastn-export-eve-min-length`. Requires BLAST+.
+
+**Speed and reuse notes (important):**
+
+- Use `--blastn-threads` to parallelize BLASTN.
+- Use `--blastn-task dc-megablast` (default) for faster EVE search on large references.
+- EVE results are cached as `eve_intervals.json` + `eve_cache_meta.json` inside `--out-dir`. If inputs, DB fingerprint, and BLAST parameters are unchanged, CHIMERA reuses cached EVE intervals and skips BLAST.
+- To force recomputation, use `--force-recompute` (`blastn-filter`) or `--blastn-force-recompute` (`pipeline`/`temporal-pipeline`).
 
 ---
 

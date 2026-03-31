@@ -3,9 +3,14 @@ from __future__ import annotations
 import subprocess
 import sys
 import re
+import argparse
+import time
 from pathlib import Path
 
+import pytest
 from Bio import SeqIO
+from Bio.Seq import Seq
+from Bio.SeqRecord import SeqRecord
 
 
 # Project root
@@ -206,4 +211,145 @@ def test_subcommand_help_smoke_covers_flags() -> None:
         code, out, err = run_cmd([sub, "--help"], timeout_s=15)
         assert code == 0, f"{sub} --help failed: code={code}\nstdout={out}\nstderr={err}"
         assert ("usage:" in (out.lower() + err.lower())) or (out.strip() != ""), f"{sub} --help produced no output"
+
+
+def test_split_train_test_accepts_fraction(monkeypatch, tmp_path: Path) -> None:
+    from metagenome_generator import similarity_filter
+    from metagenome_generator.chunk_genomes import split_train_test_and_write
+
+    # Keep all test reads so this test checks split parsing, not BLAST behavior.
+    monkeypatch.setattr(
+        similarity_filter,
+        "filter_candidates_against_kept",
+        lambda candidates, *_args, **_kwargs: candidates,
+    )
+
+    records = [
+        SeqRecord(Seq("ACGT" * 20), id=f"r{i}", description="")
+        for i in range(10)
+    ]
+    n_train, n_test = split_train_test_and_write(
+        records,
+        0.8,  # should be interpreted as 80%
+        seed=7,
+        output_dir=tmp_path,
+        output_stem="mg",
+    )
+    assert n_train == 8
+    assert n_test == 2
+
+
+def test_split_metagenome_default_train_test_split_is_80_percent() -> None:
+    from metagenome_generator.cli import _add_split_metagenome_train_test_subparser
+
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="command")
+    _add_split_metagenome_train_test_subparser(subparsers)
+    args = parser.parse_args(["split-metagenome-train-test", "--input", "x.fasta"])
+    assert args.train_test_split == 80.0
+
+
+def test_split_train_test_written_files_match_expected_ratio(monkeypatch, tmp_path: Path) -> None:
+    from metagenome_generator import similarity_filter
+    from metagenome_generator.chunk_genomes import split_train_test_and_write
+
+    monkeypatch.setattr(
+        similarity_filter,
+        "filter_candidates_against_kept",
+        lambda candidates, *_args, **_kwargs: candidates,
+    )
+
+    records = [
+        SeqRecord(Seq(("ACGT" * 30)[:100]), id=f"r{i}", description="")
+        for i in range(25)
+    ]
+    split_train_test_and_write(
+        records,
+        80.0,
+        seed=11,
+        output_dir=tmp_path,
+        output_stem="ratio",
+    )
+    train_recs = list(SeqIO.parse(str(tmp_path / "ratio_train.fasta"), "fasta"))
+    test_recs = list(SeqIO.parse(str(tmp_path / "ratio_test.fasta"), "fasta"))
+    assert len(train_recs) == 20
+    assert len(test_recs) == 5
+
+
+def test_split_train_test_performance_smoke(monkeypatch, tmp_path: Path) -> None:
+    from metagenome_generator import similarity_filter
+    from metagenome_generator.chunk_genomes import split_train_test_and_write
+
+    monkeypatch.setattr(
+        similarity_filter,
+        "filter_candidates_against_kept",
+        lambda candidates, *_args, **_kwargs: candidates,
+    )
+
+    records = [
+        SeqRecord(Seq(("ACGT" * 50)[:200]), id=f"perf_{i}", description="")
+        for i in range(2000)
+    ]
+    t0 = time.perf_counter()
+    n_train, n_test = split_train_test_and_write(
+        records,
+        80.0,
+        seed=3,
+        output_dir=tmp_path,
+        output_stem="perf",
+    )
+    elapsed = time.perf_counter() - t0
+    assert n_train == 1600
+    assert n_test == 400
+    # generous bound: catches major regressions without flakiness
+    assert elapsed < 5.0
+
+
+@pytest.mark.parametrize(
+    ("split_value", "expected_train", "expected_test"),
+    [
+        (0.7, 140, 60),
+        (70.0, 140, 60),
+        (80.0, 160, 40),
+        (0.9, 180, 20),
+        (90.0, 180, 20),
+    ],
+)
+def test_split_values_and_performance_with_min_100_reads(
+    monkeypatch,
+    tmp_path: Path,
+    split_value: float,
+    expected_train: int,
+    expected_test: int,
+) -> None:
+    from metagenome_generator import similarity_filter
+    from metagenome_generator.chunk_genomes import split_train_test_and_write
+
+    # Keep all test reads so split percentages are directly testable.
+    monkeypatch.setattr(
+        similarity_filter,
+        "filter_candidates_against_kept",
+        lambda candidates, *_args, **_kwargs: candidates,
+    )
+
+    # 200 reads >= requested minimum of 100.
+    records = [
+        SeqRecord(Seq(("ACGT" * 50)[:200]), id=f"s{i}", description="")
+        for i in range(200)
+    ]
+
+    t0 = time.perf_counter()
+    n_train, n_test = split_train_test_and_write(
+        records,
+        split_value,
+        seed=13,
+        output_dir=tmp_path,
+        output_stem=f"split_{str(split_value).replace('.', '_')}",
+    )
+    elapsed = time.perf_counter() - t0
+
+    assert n_train == expected_train
+    assert n_test == expected_test
+    # Performance guard for this small synthetic case.
+    assert elapsed < 5.0
 
