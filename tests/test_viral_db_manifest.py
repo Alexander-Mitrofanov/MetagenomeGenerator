@@ -55,11 +55,13 @@ def test_verify_detects_checksum_mismatch(tmp_path: Path):
         bf.verify_viral_db(db_prefix, manifest_path=manifest)
 
 
-def test_run_blastn_from_dirs_reuses_eve_cache(tmp_path: Path, monkeypatch):
+def test_run_blastn_from_dirs_reuses_per_query_eve_store(tmp_path: Path, monkeypatch):
     genome_dir = tmp_path / "genomes"
     (genome_dir / "bacteria").mkdir(parents=True, exist_ok=True)
     (genome_dir / "bacteria" / "B1.fasta").write_text(">B1\n" + ("ACGT" * 50) + "\n")
     out_dir = tmp_path / "out"
+    out_dir2 = tmp_path / "out2"
+    shared_store = tmp_path / "eve_store"
 
     db_prefix = tmp_path / "blastn_db" / "viral_db"
     _make_fake_db(db_prefix)
@@ -83,26 +85,28 @@ def test_run_blastn_from_dirs_reuses_eve_cache(tmp_path: Path, monkeypatch):
         num_threads=2,
         task="dc-megablast",
         reuse_cache=True,
+        eve_query_store=shared_store,
     )
     assert first
     assert calls["n"] == 1
     assert (out_dir / "eve_intervals.json").exists()
-    assert (out_dir / "eve_cache_meta.json").exists()
+    assert not (out_dir / "eve_cache_meta.json").exists()
+    assert any(shared_store.rglob("*.json"))
 
-    # If cache works, this replacement should never be called.
     def _should_not_run(*_args, **_kwargs):
-        raise AssertionError("run_blastn should not execute on cache hit")
+        raise AssertionError("run_blastn should not execute on per-query store hit")
 
     monkeypatch.setattr(bf, "run_blastn", _should_not_run)
     second = bf.run_blastn_from_dirs(
         genome_dir,
-        out_dir,
+        out_dir2,
         viral_db_prefix=db_prefix,
         perc_identity=70.0,
         evalue=1e-5,
         num_threads=2,
         task="dc-megablast",
         reuse_cache=True,
+        eve_query_store=shared_store,
     )
     assert second == first
 

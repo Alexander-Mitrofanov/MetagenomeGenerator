@@ -160,6 +160,15 @@ BASES = "ACGT"
 ILLUMINA_BASE_ERROR = 0.001   # ~0.1% at start of read
 ILLUMINA_END_ERROR = 0.012    # ~1.2% toward end (typical for 250 bp)
 
+# Contig-quality presets inspired by real metagenome benchmarks:
+# low/medium/high bins map to different length ranges and weights.
+CONTIG_QUALITY_PRESETS: dict[str, list[tuple[int, int, float]]] = {
+    "realistic": [(300, 1200, 0.55), (1200, 5000, 0.35), (5000, 15000, 0.10)],
+    "high-quality": [(1000, 4000, 0.20), (4000, 12000, 0.50), (12000, 30000, 0.30)],
+    "low-quality": [(300, 900, 0.75), (900, 2500, 0.20), (2500, 6000, 0.05)],
+}
+CONTIG_QUALITY_PRESET_NAMES = tuple(sorted(CONTIG_QUALITY_PRESETS.keys()))
+
 
 def normalize_train_split_percent(train_split: float) -> float:
     """Normalize train split to percentage points.
@@ -171,6 +180,29 @@ def normalize_train_split_percent(train_split: float) -> float:
     if 0.0 < train_split <= 1.0:
         return train_split * 100.0
     return train_split
+
+
+def _contig_profile_components(name: str) -> list[tuple[int, int, float]]:
+    if name not in CONTIG_QUALITY_PRESETS:
+        raise ValueError(f"Unknown contig quality profile: {name}. Choose one of {CONTIG_QUALITY_PRESET_NAMES}")
+    return CONTIG_QUALITY_PRESETS[name]
+
+
+def contig_quality_profile_mean_length(name: str) -> int:
+    comps = _contig_profile_components(name)
+    weighted = sum(((lo + hi) / 2.0) * w for (lo, hi, w) in comps)
+    return max(1, int(round(weighted)))
+
+
+def _weighted_length_from_profile(rng: random.Random, components: list[tuple[int, int, float]]) -> int:
+    x = rng.random()
+    acc = 0.0
+    for lo, hi, w in components:
+        acc += w
+        if x <= acc:
+            return rng.randint(lo, hi)
+    lo, hi, _w = components[-1]
+    return rng.randint(lo, hi)
 
 
 def _apply_illumina_like_errors(
@@ -367,12 +399,50 @@ def chunk_sequence_variable(
             break
 
 
+def chunk_sequence_quality_profile(
+    record,
+    prefix: str,
+    profile_name: str,
+    reads_per_organism: int | None,
+    rng: random.Random | None = None,
+    yield_coords: bool = False,
+):
+    """Split sequence into non-overlapping contigs using a quality-profile length mixture."""
+    rng = rng or random.Random()
+    seq = record.seq
+    idx = 0
+    pos = 0
+    components = _contig_profile_components(profile_name)
+    min_len = min(lo for (lo, _hi, _w) in components)
+    while pos < len(seq):
+        length = _weighted_length_from_profile(rng, components)
+        end = min(pos + length, len(seq))
+        if end - pos < min_len:
+            break
+        start = pos
+        sub = seq[start:end]
+        rec = SeqRecord(
+            sub,
+            id=f"{prefix}_contig_{idx}",
+            description=f"start={start} end={end}",
+        )
+        if yield_coords:
+            yield rec, start, end
+        else:
+            yield rec
+        idx += 1
+        pos = end
+        if reads_per_organism is not None and idx >= reads_per_organism:
+            break
+
+
 def get_file_stats(
     input_path: Path,
     sequence_length: int,
     *,
     min_length: int | None = None,
     max_length: int | None = None,
+    contig_quality_profile: str | None = None,
 ) -> list[tuple[str, Path, int, int]]:
     """Scan input (file or dir of *.fasta) and return (prefix, path, total_bases, max_reads) per file.
 
@@ -385,7 +455,9 @@ def get_file_stats(
         files = iter_genome_fastas(input_path)
 
     effective_len = sequence_length
-    if min_length is not None and max_length is not None:
+    if contig_quality_profile is not None:
+        effective_len = contig_quality_profile_mean_length(contig_quality_profile)
+    elif min_length is not None and max_length is not None:
         effective_len = (min_length + max_length) // 2
 
     result: list[tuple[str, Path, int, int]] = []
@@ -416,6 +488,7 @@ def _collect_chunks_for_file(
     *,
     min_length: int | None = None,
     max_length: int | None = None,
+    contig_quality_profile: str | None = None,
     seed: int | None = None,
     eve_intervals: dict[tuple[str, str], list[tuple[int, int]]] | None = None,
     allow_ambiguous: bool = True,
@@ -443,7 +516,26 @@ def _collect_chunks_for_file(
         key = (prefix, record.id)
         intervals = eve_intervals.get(key, []) if eve_intervals else []
 
-        if min_length is not None and max_length is not None:
+        if contig_quality_profile is not None:
+            for item in chunk_sequence_quality_profile(
+                record, prefix, contig_quality_profile, reads_per_organism, rng=rng, yield_coords=use_eve
+            ):
+                if use_eve:
+                    rec, start, end = item
+                    if chunk_overlaps_eve(start, end, intervals):
+                        continue
+                else:
+                    rec = item
+                # Ensure FASTA/FASTQ headers start with the category class label.
+                rec.id = f"{cat}_{rec.id}"
+                if not _is_allowed_sequence(rec, allow_ambiguous):
+                    continue
+                if apply_platform:
+                    rec = _apply_error_model_to_record(rec, error_model, mutation_rng)
+                elif apply_mutations:
+                    rec = _apply_mutations_to_record(rec, substitution_rate, indel_rate, mutation_rng)
+                chunks.append(rec)
+        elif min_length is not None and max_length is not None:
             for item in chunk_sequence_variable(
                 record, prefix, min_length, max_length, reads_per_organism, rng=rng, yield_coords=use_eve
             ):
@@ -502,6 +594,7 @@ def _collect_chunks_from_multirecord_fasta(
     *,
     min_length: int | None = None,
     max_length: int | None = None,
+    contig_quality_profile: str | None = None,
     seed: int | None = None,
     allow_ambiguous: bool = True,
     substitution_rate: float = 0.0,
@@ -525,7 +618,20 @@ def _collect_chunks_from_multirecord_fasta(
         file_mutation_rng = random.Random(seed + 30000 + rec_idx) if (use_platform or use_mutations) else None
         apply_platform_here = use_platform and file_mutation_rng is not None
         apply_mutations = use_mutations and file_mutation_rng is not None
-        if min_length is not None and max_length is not None:
+        if contig_quality_profile is not None:
+            for item in chunk_sequence_quality_profile(
+                record, prefix, contig_quality_profile, reads_per_organism, rng=rng, yield_coords=False
+            ):
+                rec = item
+                rec.id = f"{category_label}_{rec.id}"
+                if not _is_allowed_sequence(rec, allow_ambiguous):
+                    continue
+                if apply_platform_here:
+                    rec = _apply_error_model_to_record(rec, error_model, file_mutation_rng)
+                elif apply_mutations:
+                    rec = _apply_mutations_to_record(rec, substitution_rate, indel_rate, file_mutation_rng)
+                chunks.append(rec)
+        elif min_length is not None and max_length is not None:
             for item in chunk_sequence_variable(
                 record, prefix, min_length, max_length, reads_per_organism, rng=rng, yield_coords=False
             ):
@@ -570,6 +676,7 @@ def build_metagenome(
     *,
     min_length: int | None = None,
     max_length: int | None = None,
+    contig_quality_profile: str | None = None,
     seed: int | None = None,
     cap_total_reads: int | None = None,
     eve_intervals: dict[tuple[str, str], list[tuple[int, int]]] | None = None,
@@ -593,12 +700,13 @@ def build_metagenome(
     write_abundance: bool = False,
     random_chunk_start: bool = False,
 ) -> int | tuple[int, list[SeqRecord]]:
-    """Build a metagenome FASTA from input_path. Fixed-length or variable-length (min_length–max_length) contigs.
+    """Build a metagenome FASTA from input_path. Fixed-length or variable-length contigs.
 
     If cap_total_reads is set, randomly downsample to that many reads (for balancing negative to positive).
     If eve_intervals is set, reads/contigs overlapping those intervals (EVE regions) are excluded.
     If error_model is set (e.g. 'illumina'), applies platform-specific position-dependent errors; else if substitution_rate or indel_rate > 0, applies uniform mutations (seed used for reproducibility; default 42).
     If output_fastq is True, writes FASTQ instead of FASTA: applies Illumina-like errors and adds position-dependent Phred quality scores per base (output path suffix becomes .fastq).
+    If contig_quality_profile is set, contig lengths are sampled from preset low/medium/high quality strata.
     If random_chunk_start is True, fixed-length chunks (reads) are generated starting at a random offset (still non-overlapping) rather than always starting at position 0.
     If filter_similar is True: generate more reads than needed (oversample), filter out sequences that are
     >= similarity_threshold (default 90%%) similar to any already-kept sequence, then refill until target or max rounds.
@@ -612,6 +720,8 @@ def build_metagenome(
     """
     from .similarity_filter import filter_by_similarity, filter_candidates_against_kept
 
+    if contig_quality_profile is not None and (min_length is not None or max_length is not None):
+        raise ValueError("Use either contig_quality_profile OR min_length/max_length, not both.")
     if output_fastq and not error_model:
         error_model = "illumina"
     use_mutations = substitution_rate > 0 or indel_rate > 0 or bool(error_model)
@@ -662,6 +772,7 @@ def build_metagenome(
                 sequence_length,
                 min_length=min_length,
                 max_length=max_length,
+                contig_quality_profile=contig_quality_profile,
             )
             prefix_to_max_reads = {p: max_r for p, _fp, _tb, max_r in stats} if stats else {}
             read_limits = _apply_viral_taxonomy_balance(
@@ -684,6 +795,7 @@ def build_metagenome(
             prefix,
             min_length=min_length,
             max_length=max_length,
+            contig_quality_profile=contig_quality_profile,
             seed=file_seed,
             eve_intervals=eve_intervals,
             allow_ambiguous=allow_ambiguous,
@@ -704,6 +816,7 @@ def build_metagenome(
             "extra_viral",
             min_length=min_length,
             max_length=max_length,
+            contig_quality_profile=contig_quality_profile,
             seed=extra_seed,
             allow_ambiguous=allow_ambiguous,
             substitution_rate=substitution_rate,
@@ -750,6 +863,7 @@ def build_metagenome(
                     prefix,
                     min_length=min_length,
                     max_length=max_length,
+                    contig_quality_profile=contig_quality_profile,
                     seed=file_seed,
                     eve_intervals=eve_intervals,
                     allow_ambiguous=allow_ambiguous,
@@ -947,6 +1061,13 @@ def _cli(argv: list[str] | None = None) -> None:
         help="Max contig length for variable-length mode (with --min-contig-length). e.g. 2000",
     )
     parser.add_argument(
+        "--contig-quality-profile",
+        type=str,
+        default=None,
+        choices=list(CONTIG_QUALITY_PRESET_NAMES),
+        help="Preset non-overlapping contig-length stratification (low/medium/high quality bins). Mutually exclusive with --min-contig-length/--max-contig-length.",
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=None,
@@ -1040,6 +1161,8 @@ def _cli(argv: list[str] | None = None) -> None:
         print(f"Loaded EVE intervals for {len(eve_intervals)} sequences (excluding overlapping chunks).")
 
     use_variable = args.min_contig_length is not None and args.max_contig_length is not None
+    if args.contig_quality_profile is not None and (args.min_contig_length is not None or args.max_contig_length is not None):
+        parser.error("--contig-quality-profile cannot be combined with --min-contig-length/--max-contig-length")
     if use_variable and (args.min_contig_length < 1 or args.max_contig_length < args.min_contig_length):
         parser.error("--min-contig-length and --max-contig-length must be positive and min <= max")
 
@@ -1048,7 +1171,11 @@ def _cli(argv: list[str] | None = None) -> None:
 
     effective_length = args.sequence_length
     min_len, max_len = None, None
-    if use_variable:
+    quality_profile = args.contig_quality_profile
+    if quality_profile is not None:
+        effective_length = contig_quality_profile_mean_length(quality_profile)
+        print(f"Contig-quality profile: {quality_profile} (mean length ~{effective_length} bp)")
+    elif use_variable:
         min_len, max_len = args.min_contig_length, args.max_contig_length
         effective_length = (min_len + max_len) // 2
         print(f"Variable-length contigs: {min_len}–{max_len} bp (uniform)")
@@ -1060,6 +1187,7 @@ def _cli(argv: list[str] | None = None) -> None:
             effective_length,
             min_length=min_len,
             max_length=max_len,
+            contig_quality_profile=quality_profile,
         )
         if not stats:
             parser.error("No FASTA files found under --input")
@@ -1079,6 +1207,7 @@ def _cli(argv: list[str] | None = None) -> None:
         reads_per_organism,
         min_length=min_len,
         max_length=max_len,
+        contig_quality_profile=quality_profile,
         seed=args.seed,
         cap_total_reads=args.cap_total_reads,
         eve_intervals=eve_intervals,

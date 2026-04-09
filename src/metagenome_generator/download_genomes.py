@@ -338,6 +338,33 @@ def download_genomes(
     print("Done. Genome FASTAs saved in", output_dir.resolve())
 
 
+def download_accession_lists(
+    output_dir: Path,
+    bacterial_ids: list[str],
+    viral_ids: list[str],
+    archaea_ids: list[str],
+    plasmid_ids: list[str],
+) -> None:
+    """Download fixed accession lists into category subfolders (reuses existing FASTAs like download_genomes)."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    bacteria_dir = output_dir / BACTERIA_DIR
+    virus_dir = output_dir / VIRUS_DIR
+    bacteria_dir.mkdir(parents=True, exist_ok=True)
+    virus_dir.mkdir(parents=True, exist_ok=True)
+    _download_category_batched(bacterial_ids, bacteria_dir, BACTERIA_DIR, "bacteria")
+    _download_category_batched(viral_ids, virus_dir, VIRUS_DIR, "virus")
+    if archaea_ids:
+        archaea_dir = output_dir / ARCHAEA_DIR
+        archaea_dir.mkdir(parents=True, exist_ok=True)
+        _download_category_batched(archaea_ids, archaea_dir, ARCHAEA_DIR, "archaea")
+    if plasmid_ids:
+        plasmid_dir = output_dir / PLASMID_DIR
+        plasmid_dir.mkdir(parents=True, exist_ok=True)
+        _download_category_batched(plasmid_ids, plasmid_dir, PLASMID_DIR, "plasmid")
+    logger.info("download_accession_lists complete: %s", output_dir.resolve())
+    print("Done. Genome FASTAs saved in", output_dir.resolve())
+
+
 def _cli(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         description="Download bacterial and viral genomes (and optionally archaea, plasmid) from NCBI."

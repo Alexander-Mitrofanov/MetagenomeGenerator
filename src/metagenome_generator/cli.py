@@ -9,7 +9,9 @@ from pathlib import Path
 from .accession_snapshot import get_default_snapshot_path, migrate_snapshot_to_categories, run_snapshot
 from .download_genomes import download_genomes
 from .chunk_genomes import (
+    CONTIG_QUALITY_PRESET_NAMES,
     build_metagenome,
+    contig_quality_profile_mean_length,
     get_file_stats,
     normalize_train_split_percent,
     split_train_test_and_write,
@@ -20,11 +22,43 @@ from .similarity_filter import filter_test_against_train
 from .temporal_split import run_temporal_split, run_temporal_split_info, run_temporal_split_search
 from .viral_taxonomy import run_viral_taxonomy
 from .benchmark_recipe import run_benchmark_recipe
+from .biome_fetch import run_biome_dataset_pipeline, run_fetch_biome_data
 
 # Organized output layout (pipeline): one root dir with step-based subdirs for easy navigation.
 OUTPUT_DIR_DOWNLOADED = "downloaded"
 OUTPUT_DIR_BLASTN = "blastn"
 OUTPUT_DIR_LOGS = "logs"
+
+BIOME_PRESETS: dict[str, dict[str, object]] = {
+    # Practical defaults for quick "biome-like" datasets.
+    "marine": {
+        "num_bacteria": 60,
+        "num_virus": 60,
+        "num_archaea": 10,
+        "num_plasmid": 5,
+        "sequence_length": 250,
+        "reads_per_organism": 500,
+        "abundance_profile": "bacteria=1.0,virus=1.2,archaea=0.4,plasmid=0.3",
+    },
+    "soil": {
+        "num_bacteria": 80,
+        "num_virus": 40,
+        "num_archaea": 20,
+        "num_plasmid": 30,
+        "sequence_length": 250,
+        "reads_per_organism": 500,
+        "abundance_profile": "bacteria=1.4,virus=0.6,archaea=0.8,plasmid=1.0",
+    },
+    "gut": {
+        "num_bacteria": 100,
+        "num_virus": 30,
+        "num_archaea": 5,
+        "num_plasmid": 20,
+        "sequence_length": 250,
+        "reads_per_organism": 500,
+        "abundance_profile": "bacteria=1.8,virus=0.6,archaea=0.2,plasmid=0.7",
+    },
+}
 
 
 def _parse_abundance_profile(s: str | None) -> dict[str, float] | None:
@@ -242,6 +276,13 @@ def _add_chunk_subparser(subparsers) -> None:
         help="Variable-length mode: max contig length (e.g. 2000). Use with --min-contig-length.",
     )
     p.add_argument(
+        "--contig-quality-profile",
+        type=str,
+        default=None,
+        choices=list(CONTIG_QUALITY_PRESET_NAMES),
+        help="Preset non-overlapping contig-length stratification (low/medium/high quality bins). Mutually exclusive with --min-contig-length/--max-contig-length.",
+    )
+    p.add_argument(
         "--seed",
         type=int,
         default=None,
@@ -415,6 +456,13 @@ def _add_pipeline_subparser(subparsers) -> None:
         help="Variable-length contigs: max length (e.g. 2000). Use with --min-contig-length.",
     )
     p.add_argument(
+        "--contig-quality-profile",
+        type=str,
+        default=None,
+        choices=list(CONTIG_QUALITY_PRESET_NAMES),
+        help="Preset non-overlapping contig-length stratification (low/medium/high quality bins). Mutually exclusive with --min-contig-length/--max-contig-length.",
+    )
+    p.add_argument(
         "--seed",
         type=int,
         default=None,
@@ -471,7 +519,14 @@ def _add_pipeline_subparser(subparsers) -> None:
     p.add_argument(
         "--blastn-force-recompute",
         action="store_true",
-        help="Force rerun BLASTN for EVE detection (ignore cached eve_intervals.json metadata match).",
+        help="Force rerun BLASTN for EVE detection (ignore per-query EVE store).",
+    )
+    p.add_argument(
+        "--blastn-eve-query-store",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help="Shared per-genome EVE/BLAST cache for pipeline. Default: OUTPUT_DIR/eve_query_store",
     )
     p.add_argument(
         "--blastn-export-eve-fasta",
@@ -736,7 +791,14 @@ def _add_blastn_filter_subparser(subparsers) -> None:
     p.add_argument(
         "--force-recompute",
         action="store_true",
-        help="Force rerun BLASTN (ignore cached eve_intervals.json metadata match).",
+        help="Force rerun BLASTN for every query (ignore per-query EVE store entries).",
+    )
+    p.add_argument(
+        "--eve-query-store",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help="Directory for per-genome EVE/BLAST cache (shared across runs/seeds). Default: OUT_DIR/eve_query_store",
     )
     p.add_argument(
         "--export-eve-fasta",
@@ -1182,6 +1244,13 @@ def _add_temporal_pipeline_subparser(subparsers) -> None:
     p.add_argument("--sample-seed", type=int, default=42, help="Seed for sampling accessions. Default: 42")
     p.add_argument("--sequence-length", type=int, default=1000, help="Read length (nt). Default: 1000")
     p.add_argument("--reads-per-organism", type=int, default=30, help="Reads per genome. Default: 30")
+    p.add_argument(
+        "--contig-quality-profile",
+        type=str,
+        default=None,
+        choices=list(CONTIG_QUALITY_PRESET_NAMES),
+        help="Optional contig-quality stratification preset for chunking (mutually exclusive with fixed sequence-length intent).",
+    )
     p.add_argument("--train-seed", type=int, default=42, help="Chunk seed for train. Default: 42")
     p.add_argument("--test-seed", type=int, default=43, help="Chunk seed for test. Default: 43")
     p.add_argument(
@@ -1201,7 +1270,14 @@ def _add_temporal_pipeline_subparser(subparsers) -> None:
     p.add_argument(
         "--blastn-force-recompute",
         action="store_true",
-        help="Force rerun BLASTN EVE detection in temporal pipeline (ignore cache).",
+        help="Force rerun BLASTN EVE detection in temporal pipeline (ignore per-query EVE store).",
+    )
+    p.add_argument(
+        "--blastn-eve-query-store",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help="Shared per-genome EVE/BLAST cache for temporal pipeline. Default: OUTPUT_DIR/eve_query_store",
     )
     p.add_argument(
         "--viral-db-manifest",
@@ -1408,6 +1484,170 @@ def _add_benchmark_recipe_subparser(subparsers) -> None:
     p.set_defaults(func=_run_benchmark_recipe)
 
 
+def _add_fetch_biome_data_subparser(subparsers) -> None:
+    p = subparsers.add_parser(
+        "fetch-biome-data",
+        help="Fetch a reproducible fraction of biome benchmark resources (metadata/contigs/reads).",
+    )
+    p.add_argument(
+        "--output-dir",
+        type=Path,
+        required=True,
+        metavar="PATH",
+        help="Directory to write selected resources and selection_manifest.json.",
+    )
+    p.add_argument(
+        "--biome",
+        type=str,
+        default="all",
+        choices=["all", "marine", "soil", "gut"],
+        help="Biome to sample from. Default: all",
+    )
+    p.add_argument(
+        "--source",
+        type=str,
+        default="all",
+        choices=["all", "zenodo", "sra"],
+        help="Source filter for URLs in manifest. Default: all",
+    )
+    p.add_argument(
+        "--level",
+        type=str,
+        default="metadata",
+        choices=["metadata", "contigs", "reads"],
+        help="Resource level to fetch. Default: metadata",
+    )
+    p.add_argument(
+        "--fraction",
+        type=float,
+        default=1.0,
+        metavar="F",
+        help="Fraction of samples to select per biome in (0,1]. Default: 1.0",
+    )
+    p.add_argument(
+        "--max-samples",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Optional cap on selected samples per biome after applying fraction.",
+    )
+    p.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        metavar="SEED",
+        help="Seed for reproducible subset selection. Default: 42",
+    )
+    p.add_argument(
+        "--manifest-file",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Optional custom JSON manifest with biome sources.",
+    )
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Resolve and record selected files without performing network downloads.",
+    )
+    p.set_defaults(func=_run_fetch_biome_data)
+
+
+def _add_biome_metagenome_subparser(subparsers) -> None:
+    p = subparsers.add_parser(
+        "biome-metagenome",
+        help="Create a biome-like metagenome with one command using preset defaults.",
+    )
+    p.add_argument(
+        "--biome-profile",
+        type=str,
+        required=True,
+        choices=["marine", "soil", "gut"],
+        help="Biome preset to use.",
+    )
+    p.add_argument(
+        "--output-dir",
+        type=Path,
+        required=True,
+        metavar="PATH",
+        help="Output directory for dataset.",
+    )
+    p.add_argument(
+        "--output",
+        type=str,
+        default="metagenome.fasta",
+        metavar="NAME",
+        help="Output metagenome filename. Default: metagenome.fasta",
+    )
+    p.add_argument(
+        "--genome-dir",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Optional existing genome directory (bacteria/, virus/, archaea/, plasmid/) to skip downloading.",
+    )
+    p.add_argument(
+        "--accessions-file",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Optional snapshot/accessions JSON. If set, preset genome counts are applied via --max-* sampling.",
+    )
+    p.add_argument("--sample-seed", type=int, default=42, help="Sampling seed for snapshot subsets. Default: 42")
+    p.add_argument("--seed", type=int, default=42, help="Chunking/random seed. Default: 42")
+    p.add_argument("--sequence-length", type=int, default=None, metavar="N", help="Override preset read length.")
+    p.add_argument("--reads-per-organism", type=int, default=None, metavar="N", help="Override preset reads per genome.")
+    p.add_argument(
+        "--contig-quality-profile",
+        type=str,
+        default=None,
+        choices=list(CONTIG_QUALITY_PRESET_NAMES),
+        help="Optional contig-quality stratification preset (uses variable-length contigs).",
+    )
+    p.add_argument("--num-bacteria", type=int, default=None, metavar="N", help="Override preset bacterial genome count.")
+    p.add_argument("--num-virus", type=int, default=None, metavar="N", help="Override preset viral genome count.")
+    p.add_argument("--num-archaea", type=int, default=None, metavar="N", help="Override preset archaeal genome count.")
+    p.add_argument("--num-plasmid", type=int, default=None, metavar="N", help="Override preset plasmid genome count.")
+    p.add_argument(
+        "--abundance-profile",
+        type=str,
+        default=None,
+        metavar="KEY=VAL,...",
+        help="Override preset abundance profile (e.g. bacteria=1.2,virus=0.8,archaea=0.5,plasmid=0.5).",
+    )
+    p.add_argument(
+        "--run-blastn-filter",
+        action="store_true",
+        help="Enable EVE filtering (optional; slower).",
+    )
+    p.add_argument(
+        "--blastn-viral-db",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Optional viral BLAST DB prefix for EVE filtering.",
+    )
+    p.set_defaults(func=_run_biome_metagenome)
+
+
+def _add_biome_dataset_pipeline_subparser(subparsers) -> None:
+    p = subparsers.add_parser(
+        "biome-dataset-pipeline",
+        help="Fetch sampled biome contig FASTAs and build a metagenome dataset.",
+    )
+    p.add_argument("--output-dir", type=Path, required=True, metavar="PATH", help="Output directory for fetched files, staged genomes, and final metagenome.")
+    p.add_argument("--manifest-file", type=Path, required=True, metavar="PATH", help="JSON manifest containing sample-level contig_urls with category labels.")
+    p.add_argument("--biome", type=str, default="all", choices=["all", "marine", "soil", "gut"], help="Biome to sample from. Default: all")
+    p.add_argument("--source", type=str, default="all", choices=["all", "zenodo", "sra"], help="Source filter for URLs in manifest. Default: all")
+    p.add_argument("--fraction", type=float, default=1.0, metavar="F", help="Fraction of samples to select per biome in (0,1]. Default: 1.0")
+    p.add_argument("--max-samples", type=int, default=None, metavar="N", help="Optional cap on selected samples per biome.")
+    p.add_argument("--seed", type=int, default=42, metavar="SEED", help="Seed for reproducible sample selection and chunking. Default: 42")
+    p.add_argument("--sequence-length", type=int, default=250, metavar="N", help="Output read length in nt. Default: 250")
+    p.add_argument("--reads-per-organism", type=int, default=100, metavar="N", help="Reads per genome file. Default: 100")
+    p.add_argument("--output", type=str, default="metagenome_from_biome.fasta", metavar="NAME", help="Output metagenome FASTA filename. Default: metagenome_from_biome.fasta")
+    p.set_defaults(func=_run_biome_dataset_pipeline)
+
+
 def _run_benchmark_recipe(args) -> None:
     if not args.accessions_file.exists():
         raise SystemExit(f"--accessions-file not found: {args.accessions_file}")
@@ -1448,6 +1688,126 @@ def _run_benchmark_recipe(args) -> None:
     print(f"Done. Wrote {len(paths)} replicate test sets to {args.output_dir}")
     for p in paths:
         print(f"  {p}")
+
+
+def _run_fetch_biome_data(args) -> None:
+    out = run_fetch_biome_data(
+        output_dir=args.output_dir,
+        biome=args.biome,
+        source=args.source,
+        level=args.level,
+        fraction=args.fraction,
+        max_samples=getattr(args, "max_samples", None),
+        seed=args.seed,
+        manifest_file=getattr(args, "manifest_file", None),
+        dry_run=getattr(args, "dry_run", False),
+    )
+    print(f"Wrote selection manifest: {out}")
+
+
+def _run_biome_metagenome(args) -> None:
+    preset = dict(BIOME_PRESETS[args.biome_profile])
+    num_bacteria = args.num_bacteria if args.num_bacteria is not None else int(preset["num_bacteria"])
+    num_virus = args.num_virus if args.num_virus is not None else int(preset["num_virus"])
+    num_archaea = args.num_archaea if args.num_archaea is not None else int(preset["num_archaea"])
+    num_plasmid = args.num_plasmid if args.num_plasmid is not None else int(preset["num_plasmid"])
+    sequence_length = args.sequence_length if args.sequence_length is not None else int(preset["sequence_length"])
+    reads_per_organism = (
+        args.reads_per_organism if args.reads_per_organism is not None else int(preset["reads_per_organism"])
+    )
+    abundance_profile = args.abundance_profile if args.abundance_profile is not None else str(preset["abundance_profile"])
+
+    accessions_file = getattr(args, "accessions_file", None)
+    max_bacteria = num_bacteria if accessions_file is not None else None
+    max_virus = num_virus if accessions_file is not None else None
+    max_archaea = num_archaea if accessions_file is not None else None
+    max_plasmid = num_plasmid if accessions_file is not None else None
+
+    print(
+        f"Biome preset '{args.biome_profile}': "
+        f"bacteria={num_bacteria}, virus={num_virus}, archaea={num_archaea}, plasmid={num_plasmid}, "
+        f"sequence_length={sequence_length}, reads_per_organism={reads_per_organism}"
+    )
+
+    pipeline_args = argparse.Namespace(
+        num_bacteria=num_bacteria,
+        num_virus=num_virus,
+        output_dir=args.output_dir,
+        genome_dir=getattr(args, "genome_dir", None),
+        output=args.output,
+        sequence_length=sequence_length,
+        reads_per_organism=reads_per_organism,
+        balanced=False,
+        num_archaea=num_archaea,
+        num_plasmid=num_plasmid,
+        min_contig_length=None,
+        max_contig_length=None,
+        contig_quality_profile=getattr(args, "contig_quality_profile", None),
+        seed=args.seed,
+        random_chunking=False,
+        cap_total_reads=None,
+        run_blastn_filter=bool(getattr(args, "run_blastn_filter", False)),
+        blastn_out_dir=None,
+        blastn_evalue=1e-5,
+        blastn_perc_identity=70.0,
+        blastn_threads=4,
+        blastn_task="dc-megablast",
+        blastn_force_recompute=False,
+        blastn_eve_query_store=None,
+        blastn_export_eve_fasta=None,
+        blastn_export_eve_min_length=200,
+        blastn_viral_db=getattr(args, "blastn_viral_db", None),
+        blastn_viral_reference_fasta=None,
+        blastn_viral_db_manifest=None,
+        blastn_require_viral_db_sha256=None,
+        filter_similar=False,
+        similarity_threshold=90.0,
+        similarity_min_coverage=0.8,
+        oversample_factor=2.0,
+        train_test_split=None,
+        train_test_similarity_threshold=90.0,
+        train_test_blast_threads=4,
+        train_test_blast_batch_size=2000,
+        accessions_file=accessions_file,
+        save_accessions=None,
+        complete_only=False,
+        max_bacteria=max_bacteria,
+        max_virus=max_virus,
+        max_archaea=max_archaea,
+        max_plasmid=max_plasmid,
+        sample_seed=args.sample_seed,
+        forbid_ambiguous=False,
+        substitution_rate=0.0,
+        indel_rate=0.0,
+        extra_viral_fasta=None,
+        abundance_profile=abundance_profile,
+        abundance_distribution=None,
+        viral_taxonomy=None,
+        balance_viral_by_taxonomy=False,
+        error_model=None,
+        output_fastq=False,
+        write_abundance=False,
+    )
+    _run_pipeline(pipeline_args)
+
+
+def _run_biome_dataset_pipeline(args) -> None:
+    if not args.manifest_file.exists():
+        raise SystemExit(f"--manifest-file not found: {args.manifest_file}")
+    selection_manifest, metagenome_out = run_biome_dataset_pipeline(
+        output_dir=args.output_dir,
+        biome=args.biome,
+        source=args.source,
+        fraction=args.fraction,
+        max_samples=getattr(args, "max_samples", None),
+        seed=args.seed,
+        manifest_file=args.manifest_file,
+        sequence_length=args.sequence_length,
+        reads_per_organism=args.reads_per_organism,
+        metagenome_name=args.output,
+    )
+    print(f"Wrote selection manifest: {selection_manifest}")
+    print(f"Wrote metagenome dataset: {metagenome_out}")
 
 
 def _run_temporal_split_info(args) -> None:
@@ -1521,6 +1881,9 @@ def _run_chunk(args) -> None:
         raise SystemExit("--sequence-length must be >= 1")
     min_len = getattr(args, "min_contig_length", None)
     max_len = getattr(args, "max_contig_length", None)
+    quality_profile = getattr(args, "contig_quality_profile", None)
+    if quality_profile is not None and (min_len is not None or max_len is not None):
+        raise SystemExit("--contig-quality-profile cannot be combined with --min-contig-length/--max-contig-length")
     if min_len is not None and max_len is not None and min_len > max_len:
         raise SystemExit("--min-contig-length must be <= --max-contig-length")
     if args.input.is_dir():
@@ -1533,8 +1896,11 @@ def _run_chunk(args) -> None:
 
     min_len = getattr(args, "min_contig_length", None)
     max_len = getattr(args, "max_contig_length", None)
-    use_variable = min_len is not None and max_len is not None
-    effective_length = (min_len + max_len) // 2 if use_variable else args.sequence_length
+    use_variable = quality_profile is not None or (min_len is not None and max_len is not None)
+    if quality_profile is not None:
+        effective_length = contig_quality_profile_mean_length(quality_profile)
+    else:
+        effective_length = (min_len + max_len) // 2 if use_variable else args.sequence_length
 
     reads_per_organism = args.reads_per_organism
     if args.balanced:
@@ -1543,6 +1909,7 @@ def _run_chunk(args) -> None:
             effective_length,
             min_length=min_len,
             max_length=max_len,
+            contig_quality_profile=quality_profile,
         )
         if not stats:
             raise SystemExit("No FASTA files found under --input")
@@ -1580,6 +1947,7 @@ def _run_chunk(args) -> None:
         reads_per_organism,
         min_length=min_len,
         max_length=max_len,
+        contig_quality_profile=quality_profile,
         seed=getattr(args, "seed", None),
         cap_total_reads=getattr(args, "cap_total_reads", None),
         eve_intervals=eve_intervals,
@@ -1632,6 +2000,7 @@ def _run_blastn_filter(args) -> None:
         viral_db_manifest=getattr(args, "viral_db_manifest", None),
         required_viral_db_sha256=getattr(args, "require_viral_db_sha256", None),
         reuse_cache=not getattr(args, "force_recompute", False),
+        eve_query_store=getattr(args, "eve_query_store", None),
     )
     export_path = getattr(args, "export_eve_fasta", None)
     if export_path is not None:
@@ -1643,6 +2012,78 @@ def _run_blastn_filter(args) -> None:
             export_path,
             min_interval_length=getattr(args, "export_eve_min_length", 200),
         )
+
+
+def _run_genome_pool_prepare(args) -> None:
+    from .genome_pool import prepare_pool
+
+    if not args.accessions_file.exists():
+        raise SystemExit(f"--accessions-file not found: {args.accessions_file}")
+    prepare_pool(
+        args.accessions_file,
+        args.pool_dir,
+        max_bacteria=args.max_bacteria,
+        max_virus=args.max_virus,
+        max_archaea=args.max_archaea,
+        max_plasmid=args.max_plasmid,
+        pool_seed=args.pool_seed,
+    )
+
+
+def _run_genome_pool_materialize(args) -> None:
+    from .genome_pool import materialize_from_pool
+
+    materialize_from_pool(
+        args.pool_dir,
+        args.output_dir,
+        sample_seed=args.sample_seed,
+        max_bacteria=args.max_bacteria,
+        max_virus=args.max_virus,
+        max_archaea=args.max_archaea,
+        max_plasmid=args.max_plasmid,
+        use_symlinks=not args.copy,
+        clean_dest=not args.no_clean,
+    )
+
+
+def _add_genome_pool_subparser(subparsers) -> None:
+    p = subparsers.add_parser(
+        "genome-pool",
+        help="Shared genome pool: prepare downloads once; materialize per-seed subsets (symlinks) for many runs.",
+    )
+    inner = p.add_subparsers(dest="genome_pool_cmd", required=True)
+
+    prep = inner.add_parser(
+        "prepare",
+        help="Sample max_* accessions from snapshot (pool_seed) and download into pool_dir; writes pool_manifest.json.",
+    )
+    prep.add_argument("--accessions-file", type=Path, required=True, metavar="PATH")
+    prep.add_argument("--pool-dir", type=Path, required=True, metavar="DIR")
+    prep.add_argument("--max-bacteria", type=int, default=None, metavar="N")
+    prep.add_argument("--max-virus", type=int, default=None, metavar="N")
+    prep.add_argument("--max-archaea", type=int, default=None, metavar="N")
+    prep.add_argument("--max-plasmid", type=int, default=None, metavar="N")
+    prep.add_argument("--pool-seed", type=int, default=0, help="RNG seed for pool accession sampling. Default: 0")
+    prep.set_defaults(func=_run_genome_pool_prepare)
+
+    mat = inner.add_parser(
+        "materialize",
+        help="Pick a subset of the pool for sample_seed and populate output-dir (symlinks into pool).",
+    )
+    mat.add_argument("--pool-dir", type=Path, required=True, metavar="DIR")
+    mat.add_argument("--output-dir", type=Path, required=True, metavar="DIR")
+    mat.add_argument("--sample-seed", type=int, required=True, metavar="SEED")
+    mat.add_argument("--max-bacteria", type=int, default=None, metavar="N")
+    mat.add_argument("--max-virus", type=int, default=None, metavar="N")
+    mat.add_argument("--max-archaea", type=int, default=None, metavar="N")
+    mat.add_argument("--max-plasmid", type=int, default=None, metavar="N")
+    mat.add_argument("--copy", action="store_true", help="Copy FASTAs instead of symlinks")
+    mat.add_argument(
+        "--no-clean",
+        action="store_true",
+        help="Do not delete output-dir before writing (may leave stale symlinks)",
+    )
+    mat.set_defaults(func=_run_genome_pool_materialize)
 
 
 def _run_build_viral_db(args) -> None:
@@ -1736,6 +2177,7 @@ def _run_pipeline(args) -> None:
             viral_db_manifest=bv_manifest,
             required_viral_db_sha256=bv_sha,
             reuse_cache=not getattr(args, "blastn_force_recompute", False),
+            eve_query_store=getattr(args, "blastn_eve_query_store", None),
         )
         export_path = getattr(args, "blastn_export_eve_fasta", None)
         if export_path is not None:
@@ -1757,8 +2199,14 @@ def _run_pipeline(args) -> None:
 
     min_len = getattr(args, "min_contig_length", None)
     max_len = getattr(args, "max_contig_length", None)
-    use_variable = min_len is not None and max_len is not None
-    effective_length = (min_len + max_len) // 2 if use_variable else args.sequence_length
+    quality_profile = getattr(args, "contig_quality_profile", None)
+    if quality_profile is not None and (min_len is not None or max_len is not None):
+        raise SystemExit("--contig-quality-profile cannot be combined with --min-contig-length/--max-contig-length")
+    use_variable = quality_profile is not None or (min_len is not None and max_len is not None)
+    if quality_profile is not None:
+        effective_length = contig_quality_profile_mean_length(quality_profile)
+    else:
+        effective_length = (min_len + max_len) // 2 if use_variable else args.sequence_length
 
     reads_per_organism = args.reads_per_organism
     if args.balanced:
@@ -1767,6 +2215,7 @@ def _run_pipeline(args) -> None:
             effective_length,
             min_length=min_len,
             max_length=max_len,
+            contig_quality_profile=quality_profile,
         )
         if not stats:
             raise SystemExit("No FASTA files found in download-dir.")
@@ -1811,6 +2260,7 @@ def _run_pipeline(args) -> None:
         reads_per_organism,
         min_length=min_len,
         max_length=max_len,
+        contig_quality_profile=quality_profile,
         seed=getattr(args, "seed", None),
         cap_total_reads=getattr(args, "cap_total_reads", None),
         eve_intervals=eve_intervals,
@@ -1959,6 +2409,7 @@ def _run_temporal_pipeline(args) -> None:
             num_threads=getattr(args, "blastn_threads", 4),
             task=getattr(args, "blastn_task", "dc-megablast"),
             reuse_cache=not getattr(args, "blastn_force_recompute", False),
+            eve_query_store=getattr(args, "blastn_eve_query_store", None),
         )
         print("Step 4b: BLASTN filter (test) for EVE intervals")
         eve_test = run_blastn_from_dirs(
@@ -1969,6 +2420,7 @@ def _run_temporal_pipeline(args) -> None:
             num_threads=getattr(args, "blastn_threads", 4),
             task=getattr(args, "blastn_task", "dc-megablast"),
             reuse_cache=not getattr(args, "blastn_force_recompute", False),
+            eve_query_store=getattr(args, "blastn_eve_query_store", None),
         )
     else:
         print("Step 4: BLASTN filter — skipped (use --viral-db for EVE detection)")
@@ -1976,6 +2428,7 @@ def _run_temporal_pipeline(args) -> None:
     train_fasta = base / "train_metagenome.fasta"
     test_fasta = base / "test_metagenome.fasta"
     test_unfiltered = base / ".test_unfiltered.fasta"
+    quality_profile = getattr(args, "contig_quality_profile", None)
 
     # 5. Chunk train -> final file in base
     print("Step 5: Chunk train metagenome")
@@ -1984,6 +2437,7 @@ def _run_temporal_pipeline(args) -> None:
         train_fasta,
         args.sequence_length,
         args.reads_per_organism,
+        contig_quality_profile=quality_profile,
         seed=args.train_seed,
         eve_intervals=eve_train,
         random_chunk_start=getattr(args, "random_chunking", False),
@@ -1995,6 +2449,7 @@ def _run_temporal_pipeline(args) -> None:
         test_unfiltered,
         args.sequence_length,
         args.reads_per_organism,
+        contig_quality_profile=quality_profile,
         seed=args.test_seed,
         eve_intervals=eve_test,
         random_chunk_start=getattr(args, "random_chunking", False),
@@ -2014,7 +2469,7 @@ def _run_temporal_pipeline(args) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="CHIMERA — Configurable Hybrid In-silico Metagenome Emulator for Read Analysis. Commands: download, snapshot, chunk, pipeline, blastn-filter, build-viral-db, viral-taxonomy, temporal-split, temporal-split-info, temporal-split-search, temporal-pipeline, split-metagenome-train-test, filter-test-against-train, benchmark-recipe",
+        description="CHIMERA — Configurable Hybrid In-silico Metagenome Emulator for Read Analysis. Commands: download, snapshot, chunk, pipeline, blastn-filter, build-viral-db, genome-pool, viral-taxonomy, temporal-split, temporal-split-info, temporal-split-search, temporal-pipeline, split-metagenome-train-test, filter-test-against-train, benchmark-recipe, fetch-biome-data, biome-metagenome, biome-dataset-pipeline",
     )
     subparsers = parser.add_subparsers(dest="command")
     subparsers.required = True
@@ -2034,6 +2489,10 @@ def main() -> None:
     _add_temporal_pipeline_subparser(subparsers)
     _add_viral_taxonomy_subparser(subparsers)
     _add_benchmark_recipe_subparser(subparsers)
+    _add_fetch_biome_data_subparser(subparsers)
+    _add_biome_metagenome_subparser(subparsers)
+    _add_biome_dataset_pipeline_subparser(subparsers)
+    _add_genome_pool_subparser(subparsers)
 
     args = parser.parse_args()
     args.func(args)

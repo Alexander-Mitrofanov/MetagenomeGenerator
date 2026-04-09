@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "chimera-metagenome-generator"
-version = "0.7.1"
+version = "0.8.0"
 description = "CHIMERA (Configurable Hybrid In-silico Metagenome Emulator for Read Analysis): download genomes from NCBI or use your own, build simulated metagenome FASTAs for training classifiers."
 readme = "README.md"
 license = { text = "MIT" }

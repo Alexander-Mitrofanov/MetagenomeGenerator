@@ -11,16 +11,23 @@ RefSeq viral from a snapshot). Use build-viral-db to create it, then pass
 --viral-db or --viral-reference-fasta to blastn-filter.
 """
 
-import json
 import hashlib
+import json
 import logging
 import subprocess
+import sys
 import time
 from pathlib import Path
 
 from .genome_layout import get_viral_fasta_paths, get_nonviral_fasta_paths
 
 logger = logging.getLogger(__name__)
+
+
+def _progress(msg: str) -> None:
+    """Line to stdout with timestamp; always flush (important when stdout is piped to tee)."""
+    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
+
 
 # BLAST+ outfmt 6: qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore
 BLAST_COLS = "qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore".split()
@@ -56,11 +63,15 @@ def _blast_db_files(db_prefix: Path) -> list[Path]:
     return files
 
 
-def viral_db_fingerprint(db_prefix: Path) -> str:
+def viral_db_fingerprint(db_prefix: Path, *, log_each_file: bool = False) -> str:
     """Stable aggregate fingerprint over all BLAST DB files for db_prefix."""
     files = _blast_db_files(db_prefix)
     h = hashlib.sha256()
-    for fp in files:
+    n = len(files)
+    for i, fp in enumerate(files, start=1):
+        if log_each_file:
+            sz = fp.stat().st_size
+            _progress(f"EVE cache: hashing viral DB part {i}/{n}: {fp.name} ({sz:,} bytes)…")
         h.update(f"{fp.name}:{_sha256_file(fp)}\n".encode("utf-8"))
     return h.hexdigest()
 
@@ -138,11 +149,10 @@ def build_viral_db(viral_fasta: Path, db_dir: Path) -> Path:
     """Run makeblastdb on viral FASTA. Returns path to DB prefix (no extension)."""
     db_dir.mkdir(parents=True, exist_ok=True)
     db_prefix = db_dir / "viral_db"
+    # Do not capture stdout/stderr: long-running BLAST tools can fill pipe buffers and deadlock.
     subprocess.run(
         ["makeblastdb", "-in", str(viral_fasta), "-out", str(db_prefix), "-dbtype", "nucl"],
         check=True,
-        capture_output=True,
-        text=True,
     )
     return db_prefix
 
@@ -175,7 +185,13 @@ def run_blastn(
         "-num_threads", str(num_threads),
         "-task", task,
     ]
-    subprocess.run(cmd, check=True, capture_output=True, text=True)
+    # Do not capture stdout/stderr: blastn may write substantial progress to stderr; pipes can fill
+    # and block the child while the parent waits — looks like an infinite hang.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    subprocess.run(cmd, check=True)
+    sys.stdout.flush()
+    sys.stderr.flush()
 
 
 def _file_signature(path: Path) -> dict[str, int | str]:
@@ -187,62 +203,89 @@ def _file_signature(path: Path) -> dict[str, int | str]:
     }
 
 
-def _nonviral_signature(nonviral_paths: list[Path]) -> list[dict[str, int | str]]:
-    return [_file_signature(p) for p in sorted(nonviral_paths, key=lambda x: str(x.resolve()))]
-
-
-def _db_signature(
-    db_prefix: Path,
-    *,
-    viral_reference_fasta: Path | None = None,
-    source: str,
-) -> dict[str, str | dict[str, int | str]]:
-    sig: dict[str, str | dict[str, int | str]] = {
-        "source": source,
-        "db_prefix": str(db_prefix.resolve()),
-        "db_fingerprint": viral_db_fingerprint(db_prefix),
-    }
-    if viral_reference_fasta is not None:
-        sig["viral_reference_fasta"] = _file_signature(viral_reference_fasta)
-    return sig
-
-
-def _eve_cache_payload(
-    *,
-    nonviral_paths: list[Path],
-    db_prefix: Path,
-    evalue: float,
-    perc_identity: float,
-    max_target_seqs: int,
-    num_threads: int,
-    task: str,
-    viral_reference_fasta: Path | None,
-    db_source: str,
-) -> dict:
-    return {
-        "schema_version": 1,
-        "created_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "params": {
-            "evalue": float(evalue),
-            "perc_identity": float(perc_identity),
-            "max_target_seqs": int(max_target_seqs),
-            "num_threads": int(num_threads),
-            "task": task,
-        },
-        "db": _db_signature(
-            db_prefix,
-            viral_reference_fasta=viral_reference_fasta,
-            source=db_source,
-        ),
-        "nonviral": _nonviral_signature(nonviral_paths),
-    }
-
-
 def _load_json_if_exists(path: Path) -> dict | None:
     if not path.exists():
         return None
     with path.open() as f:
         return json.load(f)
+
+
+EVE_QUERY_STORE_SCHEMA = 2
+
+
+def _query_file_signature(path: Path) -> str:
+    """Stable signature for a query FASTA (resolved path + size + mtime). Symlinks to the same file share a signature."""
+    st = path.stat()
+    raw = f"{path.resolve()}|{st.st_size}|{st.st_mtime_ns}".encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _eve_blast_params_key(
+    *,
+    evalue: float,
+    perc_identity: float,
+    max_target_seqs: int,
+    task: str,
+) -> dict[str, float | int | str]:
+    return {
+        "evalue": float(evalue),
+        "perc_identity": float(perc_identity),
+        "max_target_seqs": int(max_target_seqs),
+        "task": str(task),
+    }
+
+
+def _eve_params_bucket_id(params: dict[str, float | int | str]) -> str:
+    blob = json.dumps(params, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()[:28]
+
+
+def _try_load_eve_query_entry(
+    entry_path: Path,
+    *,
+    query_stem: str,
+    query_sig: str,
+    db_fingerprint: str,
+    params: dict[str, float | int | str],
+) -> dict[tuple[str, str], list[tuple[int, int]]] | None:
+    data = _load_json_if_exists(entry_path)
+    if not data or data.get("schema") != EVE_QUERY_STORE_SCHEMA:
+        return None
+    if data.get("query_stem") != query_stem or data.get("query_sig") != query_sig:
+        return None
+    if data.get("db_fingerprint") != db_fingerprint or data.get("params") != params:
+        return None
+    out: dict[tuple[str, str], list[tuple[int, int]]] = {}
+    for k, v in data.get("intervals", {}).items():
+        parts = k.split("\t", 1)
+        if len(parts) != 2:
+            continue
+        out[(parts[0], parts[1])] = [tuple(x) for x in v]  # type: ignore[misc]
+    return out
+
+
+def _save_eve_query_entry(
+    entry_path: Path,
+    *,
+    query_stem: str,
+    query_sig: str,
+    db_fingerprint: str,
+    params: dict[str, float | int | str],
+    intervals: dict[tuple[str, str], list[tuple[int, int]]],
+) -> None:
+    entry_path.parent.mkdir(parents=True, exist_ok=True)
+    serial = {f"{a}\t{b}": [list(t) for t in ivs] for (a, b), ivs in intervals.items()}
+    payload = {
+        "schema": EVE_QUERY_STORE_SCHEMA,
+        "created_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "query_stem": query_stem,
+        "query_sig": query_sig,
+        "db_fingerprint": db_fingerprint,
+        "params": params,
+        "intervals": serial,
+    }
+    with entry_path.open("w") as f:
+        json.dump(payload, f, indent=0)
 
 
 def parse_blastn_tabular(tsv_path: Path) -> dict[str, list[tuple[int, int]]]:
@@ -301,14 +344,16 @@ def run_blastn_nonviral(
 
     db_prefix = build_viral_db(viral_fasta, blast_dir)
     logger.info("BLASTN filter: viral DB built at %s", db_prefix)
-    print(f"Viral BLAST DB: {db_prefix}")
+    _progress(f"Viral BLAST DB: {db_prefix}")
 
     eve_intervals: dict[tuple[str, str], list[tuple[int, int]]] = {}
-    for qf in nonviral_fasta_paths:
+    nq = len(nonviral_fasta_paths)
+    for qi, qf in enumerate(nonviral_fasta_paths, start=1):
         out_tsv = blast_dir / f"{qf.stem}.blastn.tsv"
         logger.info("BLASTN filter: query=%s -> %s (evalue=%s, perc_identity=%s)",
                     qf.name, out_tsv.name, evalue, perc_identity)
-        print(f"BLASTN: {qf.name} -> {out_tsv.name}")
+        _progress(f"BLASTN ({qi}/{nq}) START {qf.name} -> {out_tsv.name} (task={task}, threads={num_threads})")
+        t0 = time.perf_counter()
         run_blastn(
             qf,
             db_prefix,
@@ -319,6 +364,7 @@ def run_blastn_nonviral(
             num_threads=num_threads,
             task=task,
         )
+        _progress(f"BLASTN ({qi}/{nq}) DONE  {qf.name} in {time.perf_counter() - t0:.1f}s")
         by_id = parse_blastn_tabular(out_tsv)
         for qseqid, intervals in by_id.items():
             key = (qf.stem, qseqid)
@@ -332,7 +378,7 @@ def run_blastn_nonviral(
     with eve_json.open("w") as f:
         json.dump(serializable, f, indent=0)
     logger.info("BLASTN filter: eve_intervals.json written; %d sequences with EVE hits total", len(eve_intervals))
-    print(f"EVE intervals: {eve_json} ({len(eve_intervals)} sequences with hits)")
+    _progress(f"EVE intervals: {eve_json} ({len(eve_intervals)} sequences with hits)")
     return eve_intervals
 
 
@@ -350,6 +396,7 @@ def run_blastn_from_dirs(
     viral_db_manifest: Path | None = None,
     required_viral_db_sha256: str | None = None,
     reuse_cache: bool = True,
+    eve_query_store: Path | None = None,
 ) -> dict[tuple[str, str], list[tuple[int, int]]]:
     """Run BLASTN: non-viral (bacteria/, archaea/, plasmid/) vs viral DB.
 
@@ -357,6 +404,10 @@ def run_blastn_from_dirs(
     - viral_db_prefix: use this existing BLAST DB (e.g. from build-viral-db).
     - viral_reference_fasta: build DB from this FASTA (e.g. comprehensive RefSeq viral).
     - else: concatenate virus/ from genome_dir (current run's viral set only; limited for EVE detection).
+
+    Per-query EVE cache: ``eve_query_store`` (default ``out_dir / "eve_query_store"``) holds one JSON
+    per non-viral FASTA (keyed by resolved path + size + mtime, viral DB fingerprint, and BLAST params).
+    New genomes are BLASTed and merged; existing entries are reused when ``reuse_cache`` is True.
 
     For proper prophage/EVE detection, use a comprehensive viral reference (build-viral-db from snapshot
     or a full RefSeq viral download) and pass --viral-reference-fasta or --viral-db.
@@ -369,9 +420,8 @@ def run_blastn_from_dirs(
     blast_dir = out_dir / "blastn"
     blast_dir.mkdir(parents=True, exist_ok=True)
     eve_json = out_dir / "eve_intervals.json"
-    cache_meta = out_dir / "eve_cache_meta.json"
+    store_root = Path(eve_query_store) if eve_query_store is not None else (out_dir / "eve_query_store")
 
-    db_source = "genome_dir_virus"
     if viral_db_prefix is not None:
         db_prefix = Path(viral_db_prefix)
         nhr = db_prefix.with_suffix(".nhr") if db_prefix.suffix else db_prefix.parent / (db_prefix.name + ".nhr")
@@ -383,47 +433,65 @@ def run_blastn_from_dirs(
             required_aggregate_sha256=required_viral_db_sha256,
         )
         logger.info("BLASTN filter: using existing viral DB at %s", db_prefix)
-        print(f"Using existing viral BLAST DB: {db_prefix}")
-        db_source = "external_db"
+        _progress(f"Using existing viral BLAST DB: {db_prefix}")
     elif viral_reference_fasta is not None:
         vref = Path(viral_reference_fasta)
         if not vref.exists():
             raise FileNotFoundError(f"Viral reference FASTA not found: {vref}")
         db_prefix = build_viral_db(vref, blast_dir)
         logger.info("BLASTN filter: viral DB built from reference at %s", db_prefix)
-        print(f"Viral BLAST DB built from reference: {vref}")
-        db_source = "reference_fasta"
+        _progress(f"Viral BLAST DB built from reference: {vref}")
     else:
         viral_concat = out_dir / "viral_concat.fasta"
         _concat_viral_fasta(genome_dir, viral_concat)
         db_prefix = build_viral_db(viral_concat, blast_dir)
         logger.info("BLASTN filter: viral DB built from genome_dir virus/ at %s", db_prefix)
-        print(f"Viral BLAST DB: {db_prefix} (from genome_dir virus/; for better EVE detection use --viral-reference-fasta or build-viral-db)")
-        db_source = "genome_dir_virus"
+        _progress(
+            f"Viral BLAST DB: {db_prefix} (from genome_dir virus/; for better EVE detection use "
+            "--viral-reference-fasta or build-viral-db)"
+        )
 
-    expected_cache = _eve_cache_payload(
-        nonviral_paths=nonviral,
-        db_prefix=db_prefix,
+    logger.info("BLASTN filter: computing viral DB fingerprint for per-query EVE store")
+    _progress("Computing viral DB fingerprint for EVE query store (not running blastn yet)…")
+    db_fingerprint = viral_db_fingerprint(db_prefix, log_each_file=True)
+    _progress("Viral DB fingerprint complete.")
+    params = _eve_blast_params_key(
         evalue=evalue,
         perc_identity=perc_identity,
         max_target_seqs=max_target_seqs,
-        num_threads=num_threads,
         task=task,
-        viral_reference_fasta=viral_reference_fasta,
-        db_source=db_source,
     )
-    current_cache = _load_json_if_exists(cache_meta)
-    if reuse_cache and eve_json.exists() and current_cache == expected_cache:
-        logger.info("BLASTN filter: cache hit; reusing %s", eve_json)
-        print(f"BLASTN cache hit: reusing {eve_json} (skip BLAST)")
-        return load_eve_intervals(eve_json)
+    params_bucket = _eve_params_bucket_id(params)
+    store_bucket = store_root / db_fingerprint[:28] / params_bucket
+    store_bucket.mkdir(parents=True, exist_ok=True)
+    _progress(f"EVE query store: {store_root} (bucket …/{db_fingerprint[:12]}…/{params_bucket[:12]}…)")
 
     eve_intervals: dict[tuple[str, str], list[tuple[int, int]]] = {}
-    for qf in nonviral:
+    nq = len(nonviral)
+    n_cache_hit = 0
+    for qi, qf in enumerate(nonviral, start=1):
         out_tsv = blast_dir / f"{qf.stem}.blastn.tsv"
+        qsig = _query_file_signature(qf)
+        entry_path = store_bucket / f"{qsig}.json"
+        cached: dict[tuple[str, str], list[tuple[int, int]]] | None = None
+        if reuse_cache:
+            cached = _try_load_eve_query_entry(
+                entry_path,
+                query_stem=qf.stem,
+                query_sig=qsig,
+                db_fingerprint=db_fingerprint,
+                params=params,
+            )
+        if cached is not None:
+            n_cache_hit += 1
+            eve_intervals.update(cached)
+            _progress(f"BLASTN ({qi}/{nq}) CACHE HIT {qf.name} ({len(cached)} keyed interval rows)")
+            continue
+
         logger.info("BLASTN filter: query=%s -> %s (evalue=%s, perc_identity=%s)",
                     qf.name, out_tsv.name, evalue, perc_identity)
-        print(f"BLASTN: {qf.name} -> {out_tsv.name}")
+        _progress(f"BLASTN ({qi}/{nq}) START {qf.name} -> {out_tsv.name} (task={task}, threads={num_threads})")
+        t0 = time.perf_counter()
         run_blastn(
             qf,
             db_prefix,
@@ -434,21 +502,36 @@ def run_blastn_from_dirs(
             num_threads=num_threads,
             task=task,
         )
+        _progress(f"BLASTN ({qi}/{nq}) DONE  {qf.name} in {time.perf_counter() - t0:.1f}s")
         by_id = parse_blastn_tabular(out_tsv)
+        partial: dict[tuple[str, str], list[tuple[int, int]]] = {}
         for qseqid, intervals in by_id.items():
             key = (qf.stem, qseqid)
             eve_intervals[key] = intervals
+            partial[key] = intervals
         if by_id:
             logger.info("BLASTN filter: %s -> %d sequences with EVE hits (excluded from chunking)",
                         qf.stem, len(by_id))
+        _save_eve_query_entry(
+            entry_path,
+            query_stem=qf.stem,
+            query_sig=qsig,
+            db_fingerprint=db_fingerprint,
+            params=params,
+            intervals=partial,
+        )
 
     serializable = {f"{k[0]}\t{k[1]}": v for k, v in eve_intervals.items()}
     with eve_json.open("w") as f:
         json.dump(serializable, f, indent=0)
-    with cache_meta.open("w") as f:
-        json.dump(expected_cache, f, indent=2)
-    logger.info("BLASTN filter: eve_intervals.json written; %d sequences with EVE hits total", len(eve_intervals))
-    print(f"EVE intervals: {eve_json} ({len(eve_intervals)} sequences with hits)")
+    logger.info(
+        "BLASTN filter: eve_intervals.json written; %d sequences with hits; %d/%d queries from store",
+        len(eve_intervals), n_cache_hit, nq,
+    )
+    _progress(
+        f"EVE intervals: {eve_json} ({len(eve_intervals)} sequences with hits); "
+        f"store hits {n_cache_hit}/{nq}"
+    )
     return eve_intervals
 
 

@@ -43,6 +43,14 @@ def _make_tiny_genome_dir(tmp_path: Path) -> Path:
     return genome_dir
 
 
+def _make_large_genome_dir(tmp_path: Path) -> Path:
+    genome_dir = tmp_path / "genomes_large"
+    seq = ("ACGT" * 3000)  # length 12,000
+    _write_fasta(genome_dir / "bacteria" / "B1.fasta", "B1", seq)
+    _write_fasta(genome_dir / "virus" / "V1.fasta", "V1", seq)
+    return genome_dir
+
+
 def _first_record_start_and_id(fasta_path: Path) -> tuple[int, str]:
     recs = list(SeqIO.parse(str(fasta_path), "fasta"))
     assert recs, f"No records parsed from {fasta_path}"
@@ -206,11 +214,72 @@ def test_subcommand_help_smoke_covers_flags() -> None:
         "filter-test-against-train",
         "split-metagenome-train-test",
         "benchmark-recipe",
+        "biome-metagenome",
     ]
     for sub in subcommands:
         code, out, err = run_cmd([sub, "--help"], timeout_s=15)
         assert code == 0, f"{sub} --help failed: code={code}\nstdout={out}\nstderr={err}"
         assert ("usage:" in (out.lower() + err.lower())) or (out.strip() != ""), f"{sub} --help produced no output"
+
+
+def test_biome_metagenome_with_genome_dir_smoke(tmp_path: Path) -> None:
+    genome_dir = _make_tiny_genome_dir(tmp_path)
+    outdir = tmp_path / "biome_out"
+    outdir.mkdir()
+    code, out, err = run_cmd(
+        [
+            "biome-metagenome",
+            "--biome-profile",
+            "marine",
+            "--genome-dir",
+            str(genome_dir),
+            "--output-dir",
+            str(outdir),
+            "--output",
+            "mg.fasta",
+            "--reads-per-organism",
+            "2",
+            "--sequence-length",
+            "10",
+            "--seed",
+            "3",
+        ]
+    )
+    assert code == 0, f"biome-metagenome failed: code={code}\nstdout={out}\nstderr={err}"
+    out_fa = outdir / "mg.fasta"
+    assert out_fa.exists()
+    recs = list(SeqIO.parse(str(out_fa), "fasta"))
+    assert recs, "Expected generated metagenome reads"
+
+
+def test_chunk_contig_quality_profile_generates_variable_contigs(tmp_path: Path) -> None:
+    genome_dir = _make_large_genome_dir(tmp_path)
+    outdir = tmp_path / "profile_out"
+    outdir.mkdir()
+    code, out, err = run_cmd(
+        [
+            "chunk",
+            "--input",
+            str(genome_dir),
+            "--output",
+            "mg.fasta",
+            "--output-dir",
+            str(outdir),
+            "--reads-per-organism",
+            "6",
+            "--seed",
+            "2",
+            "--contig-quality-profile",
+            "low-quality",
+        ]
+    )
+    assert code == 0, f"chunk contig-quality-profile failed: code={code}\nstdout={out}\nstderr={err}"
+    recs = list(SeqIO.parse(str(outdir / "mg.fasta"), "fasta"))
+    assert recs
+    lens = [len(r.seq) for r in recs]
+    assert min(lens) >= 300
+    assert max(lens) <= 6000
+    assert len(set(lens)) > 1
 
 
 def test_split_train_test_accepts_fraction(monkeypatch, tmp_path: Path) -> None:
