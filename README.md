@@ -94,18 +94,13 @@ Use this section when deciding **which commands to chain** for reproducible benc
 | Approach | What it does | When to use it |
 |----------|----------------|----------------|
 | **`pipeline`** | Download (or `--genome-dir`) → optional BLASTN EVE (`--run-blastn-filter`) → read generation. Can write **train/test FASTAs in one go** via `--train-test-split`. | Single end-to-end run from counts or an existing genome directory; simplest path if you do not need to reuse the same metagenome with several split seeds. |
-| **`download` + `blastn-filter` + `chunk` + `split-metagenome-train-test`** | Explicit steps: fetch genomes, build `eve_intervals.json`, chunk once to **one** metagenome FASTA, then split (possibly many times with different `--seed`). | Same genomes and same chunked metagenome, **multiple train/test splits** (e.g. 5 seeds × 5 read lengths in benchmark scripts). The **`chunk` subcommand does not accept `--train-test-split`**—use **`split-metagenome-train-test`** on the metagenome file instead. |
-| **`benchmark-recipe`** | Samples a fixed **N per category** from a snapshot for **R replicates**; picks diverse genomes (genome-level BLAST scoring); each replicate gets **`{stem}_train.*` / `{stem}_test.*`** with similarity filtering. | Published-style **structured benchmark** with named replicates under `replicate_XXX/`; not the same layout as the optional **25-run matrix shell scripts** (below). |
+| **`download` + `blastn-filter` + `chunk` + `split-metagenome-train-test`** | Explicit steps: fetch genomes, build `eve_intervals.json`, chunk once to **one** metagenome FASTA, then split (possibly many times with different `--seed`). | Same genomes and same chunked metagenome, **multiple train/test splits** (e.g. several read lengths or shuffle seeds). The **`chunk` subcommand does not accept `--train-test-split`**—use **`split-metagenome-train-test`** on the metagenome file instead. |
+| **`benchmark-recipe`** | Samples a fixed **N per category** from a snapshot for **R replicates**; picks diverse genomes (genome-level BLAST scoring); each replicate gets **`{stem}_train.*` / `{stem}_test.*`** with similarity filtering. | Published-style **structured benchmark** with named replicates under `replicate_XXX/`. |
 | **`genome-pool prepare` + `genome-pool materialize`** | **Prepare:** download up to `max_*` accessions into a **shared pool** (one heavy download). **Materialize:** symlink (or copy) a reproducible subset into a per-run genome directory. | Large studies where many runs share the same underlying download; avoids re-fetching genomes for each experiment. Ordinary **`download`** writes straight to one output tree and does not build a pool. |
 | **`temporal-pipeline`** (or manual `temporal-split` + downloads + chunk + **`filter-test-against-train`**) | Splits accessions by **NCBI submission date**; builds separate train/test metagenomes; removes test reads similar to train. | **Time-based generalization** (“train on past, test on future”), not a random 80/20 split of one metagenome. |
 | **`biome-metagenome` / `biome-dataset-pipeline`** | Preset biome-like defaults or contig-fetch + chunk in fewer steps. | Convenience over manual tuning of every `pipeline` flag. |
 
-**BLAST / EVE:** Run **`blastn-filter`** once per genome directory (optionally with **`--eve-query-store`** pointing at a shared directory) so per-genome EVE results are **reused** across reruns and matrix jobs. Use **`--force-recompute`** to ignore that store.
-
-**Example shell workflows** (in-repo, relative to repo root):
-
-- **`scripts/run_benchmark_25_matrix.sh`** — Full **5 read lengths × 5 split seeds** matrix: pool prepare/materialize → shared `blastn-filter` → one **`chunk` per length** → **`split-metagenome-train-test` per seed**. Environment variables: `BENCH_ROOT`, `READS_PER_ORG`, `SNAP`, `VIRAL_DB`, etc. Logs: `${BENCH_ROOT}/logs/`.
-- **`scripts/run_benchmark_25_mock.sh`** — Same **25-run structure** with **tiny synthetic genomes** (one FASTA per category) for quick timing checks; **no NCBI pool**.
+**BLAST / EVE:** Run **`blastn-filter`** once per genome directory (optionally with **`--eve-query-store`** pointing at a shared directory) so per-genome EVE results are **reused** across reruns. Use **`--force-recompute`** to ignore that store.
 
 ---
 
@@ -594,7 +589,7 @@ Full options: `metagenome-generator <command> --help`.
 | Biome convenience | One-command biome presets (`biome-metagenome`) and fractional benchmark resource fetch (`fetch-biome-data`). |
 | Train/test | Temporal split by CreateDate or percentage split; **filter-test-against-train** / similarity filtering. |
 | EVE | BLAST non-viral vs viral; exclude or export provirus regions. |
-| Benchmark | `benchmark-recipe`: fixed N per category, R diverse replicates; genome-level BLAST-driven diversity; generates `{output_stem}_train.*` and `{output_stem}_test.*` with train-vs-test similarity filtering. Optional shell matrices: `scripts/run_benchmark_25_matrix.sh`, `scripts/run_benchmark_25_mock.sh`. |
+| Benchmark | `benchmark-recipe`: fixed N per category, R diverse replicates; genome-level BLAST-driven diversity; generates `{output_stem}_train.*` and `{output_stem}_test.*` with train-vs-test similarity filtering. |
 | Genome pool | `genome-pool prepare` / `materialize` for shared NCBI downloads and reproducible subsets. |
 
 ---
@@ -604,8 +599,7 @@ Full options: `metagenome-generator <command> --help`.
 ```
 MetagenomeGenerator/
 ├── scripts/
-│   ├── run_benchmark_25_matrix.sh
-│   └── run_benchmark_25_mock.sh
+│   └── release_assets_manifest.txt
 ├── pyproject.toml
 ├── README.md
 ├── LICENSE
