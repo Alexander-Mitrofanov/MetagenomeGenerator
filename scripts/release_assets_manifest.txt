@@ -1,0 +1,4 @@
+# Paths (one per line) under the repo root to attach to every GitHub Release when it is published.
+# Lines starting with # and blank lines are ignored.
+# Update this file when the canonical accession snapshot date changes.
+snapshots/accession_snapshot_2026-03-10.json

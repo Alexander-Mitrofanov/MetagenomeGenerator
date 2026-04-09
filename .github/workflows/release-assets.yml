@@ -1,0 +1,78 @@
+# Attach reproducibility assets to each published release:
+#   1) Accession snapshot(s) listed in scripts/release_assets_manifest.txt (from the repo tree).
+#   2) Viral BLAST DB tarball: copy viral_db*.tar.gz from the most recent older release that has one,
+#      so the same DB stays attached until you intentionally ship a new tarball on a release.
+name: Release assets
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  attach-manifest-files:
+    name: Upload manifest-listed files from repo
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Upload snapshot(s) from manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${{ github.event.release.tag_name }}"
+          REPO="${{ github.repository }}"
+          MANIFEST="scripts/release_assets_manifest.txt"
+          test -f "$MANIFEST"
+          args=()
+          while IFS= read -r line || [[ -n "$line" ]]; do
+            line="${line#"${line%%[![:space:]]*}"}"
+            line="${line%"${line##*[![:space:]]}"}"
+            [[ -z "$line" || "$line" == \#* ]] && continue
+            if [[ ! -f "$line" ]]; then
+              echo "::error::Manifest lists missing path: $line"
+              exit 1
+            fi
+            args+=("$line")
+          done < "$MANIFEST"
+          if [[ ${#args[@]} -eq 0 ]]; then
+            echo "::error::No paths to upload (check $MANIFEST)"
+            exit 1
+          fi
+          gh release upload "$TAG" "${args[@]}" --repo "$REPO" --clobber
+
+  propagate-viral-db:
+    name: Propagate viral_db*.tar.gz from a prior release
+    needs: attach-manifest-files
+    runs-on: ubuntu-latest
+    steps:
+      - name: Copy viral DB asset forward
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${{ github.event.release.tag_name }}"
+          REPO="${{ github.repository }}"
+          mkdir -p /tmp/viral-prop
+          found=""
+          while IFS= read -r rel; do
+            [[ "$rel" == "$TAG" ]] && continue
+            if gh release download "$rel" --repo "$REPO" -p "viral_db*.tar.gz" -D /tmp/viral-prop 2>/dev/null; then
+              if compgen -G "/tmp/viral-prop/viral_db*.tar.gz" > /dev/null; then
+                echo "Using viral DB asset from release $rel"
+                found=1
+                break
+              fi
+            fi
+          done < <(gh release list --repo "$REPO" --exclude-drafts --limit 50 --json tagName --jq -r '.[].tagName')
+
+          if [[ -n "$found" ]]; then
+            gh release upload "$TAG" /tmp/viral-prop/viral_db*.tar.gz --repo "$REPO" --clobber
+            echo "Uploaded viral_db tarball(s) to $TAG"
+          else
+            echo "::warning::No viral_db*.tar.gz on prior releases. Build with build-viral-db, then upload once:" \
+              "gh release upload $TAG viral_db_YYYY-MM-DD.tar.gz --repo $REPO"
+          fi
