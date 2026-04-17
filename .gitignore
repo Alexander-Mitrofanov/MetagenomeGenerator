@@ -40,6 +40,9 @@ docs/
 # InSilicoSeq comparison (local only; do not push)
 insilicoseq_comparison/
 
+# One-off experiment outputs (large JSON / TSV)
+experiments/viral_host_stratify/out/
+
 # Test and coverage
 .pytest_cache/
 .coverage
