@@ -31,7 +31,7 @@ Entrez.email = os.environ.get("ENTREZ_EMAIL", "your_email@example.com")
 Entrez.api_key = os.environ.get("ENTREZ_API_KEY")
 
 SLEEP = 0.34
-ELINK_BATCH = 25
+ESUMMARY_BATCH = 100
 EFETCH_TAX_BATCH = 100
 MAX_RETRIES = 3
 
@@ -40,8 +40,8 @@ def _local_tag(tag: str) -> str:
     return tag.split("}")[-1] if "}" in tag else tag
 
 
-def taxid_from_elink(accessions: list[str]) -> dict[str, str]:
-    """accession -> virus taxid (nuccore elink to taxonomy)."""
+def taxids_from_nucleotide_esummary(accessions: list[str]) -> dict[str, str]:
+    """accession -> organism taxid from nuccore esummary (reliable for batched RefSeq IDs)."""
     if not accessions:
         return {}
     id_str = ",".join(accessions)
@@ -49,8 +49,8 @@ def taxid_from_elink(accessions: list[str]) -> dict[str, str]:
     time.sleep(SLEEP)
     for attempt in range(MAX_RETRIES):
         try:
-            handle = Entrez.elink(dbfrom="nuccore", db="taxonomy", id=id_str)
-            data = Entrez.read(handle)
+            handle = Entrez.esummary(db="nucleotide", id=id_str)
+            records = Entrez.read(handle)
             handle.close()
             break
         except Exception:
@@ -60,10 +60,33 @@ def taxid_from_elink(accessions: list[str]) -> dict[str, str]:
                 return {}
     else:
         return {}
-    link_sets = data if isinstance(data, list) else [data]
-    for i, ls in enumerate(link_sets):
-        if i >= len(accessions):
+    for rec in records:
+        acc = rec.get("AccessionVersion") or rec.get("Caption")
+        tid = rec.get("TaxId")
+        if acc is None or tid is None:
+            continue
+        result[str(acc)] = str(int(tid))
+    return result
+
+
+def taxid_from_elink_single(accession: str) -> str | None:
+    """Fallback: one accession -> taxonomy taxid via elink."""
+    time.sleep(SLEEP)
+    for attempt in range(MAX_RETRIES):
+        try:
+            handle = Entrez.elink(dbfrom="nuccore", db="taxonomy", id=accession)
+            data = Entrez.read(handle)
+            handle.close()
             break
+        except Exception:
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(1.0 * (attempt + 1))
+            else:
+                return None
+    else:
+        return None
+    link_sets = data if isinstance(data, list) else [data]
+    for ls in link_sets:
         if not isinstance(ls, dict):
             continue
         for ldb in ls.get("LinkSetDb") or []:
@@ -74,21 +97,9 @@ def taxid_from_elink(accessions: list[str]) -> dict[str, str]:
                 link0 = links[0]
                 tid = link0.get("Id") if isinstance(link0, dict) else getattr(link0, "Id", None)
                 if tid:
-                    result[accessions[i]] = str(tid)
+                    return str(tid)
             break
-    if not result and link_sets and len(link_sets) == 1:
-        single = link_sets[0]
-        if isinstance(single, dict):
-            for ldb in single.get("LinkSetDb") or []:
-                if ldb.get("DbTo") == "taxonomy":
-                    for j, link in enumerate(ldb.get("Link") or []):
-                        if j >= len(accessions):
-                            break
-                        tid = link.get("Id") if isinstance(link, dict) else getattr(link, "Id", None)
-                        if tid:
-                            result[accessions[j]] = str(tid)
-                    break
-    return result
+    return None
 
 
 def lineage_string_for_taxids(taxids: list[str]) -> dict[str, str]:
@@ -225,15 +236,19 @@ def main() -> None:
     tsv_path = args.output_dir / "viral_host_classification.tsv"
 
     acc_to_taxid: dict[str, str] = {}
-    for i in range(0, len(accessions), ELINK_BATCH):
-        batch = accessions[i : i + ELINK_BATCH]
-        acc_to_taxid.update(taxid_from_elink(batch))
-        print(f"  elink {min(i + ELINK_BATCH, len(accessions))}/{len(accessions)}", flush=True)
+    for i in range(0, len(accessions), ESUMMARY_BATCH):
+        batch = accessions[i : i + ESUMMARY_BATCH]
+        acc_to_taxid.update(taxids_from_nucleotide_esummary(batch))
+        print(f"  esummary nucleotide {min(i + ESUMMARY_BATCH, len(accessions))}/{len(accessions)}", flush=True)
     missing = [a for a in accessions if not acc_to_taxid.get(a)]
     if missing:
         print(f"  elink fallback (single id) for {len(missing)} accessions", flush=True)
-        for a in missing:
-            acc_to_taxid.update(taxid_from_elink([a]))
+        for j, a in enumerate(missing):
+            tid = taxid_from_elink_single(a)
+            if tid:
+                acc_to_taxid[a] = tid
+            if (j + 1) % 200 == 0:
+                print(f"    ... elink fallback {j + 1}/{len(missing)}", flush=True)
 
     unique_taxids = sorted({t for t in acc_to_taxid.values() if t})
     taxid_to_lineage: dict[str, str] = {}
