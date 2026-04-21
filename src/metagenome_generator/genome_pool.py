@@ -117,6 +117,31 @@ def materialize_from_pool(
     mp = pool_dir / POOL_MANIFEST_NAME
     if not mp.is_file():
         raise FileNotFoundError(f"Pool manifest not found: {mp} (run genome-pool prepare first)")
+
+    # Guard: refuse to materialize into the pool directory itself or anything that
+    # contains it, otherwise clean_dest=True would delete the shared pool. Also
+    # refuse the reverse (pool inside dest), which would wipe the pool manifest
+    # too. Compare resolved paths so symlinks and relative paths are handled.
+    pool_resolved = pool_dir.resolve()
+    dest_resolved = dest_dir.resolve()
+    if dest_resolved == pool_resolved:
+        raise ValueError(
+            f"--output-dir must differ from --pool-dir to avoid clobbering the "
+            f"shared pool (both resolve to {pool_resolved})."
+        )
+    try:
+        pool_resolved.relative_to(dest_resolved)
+        pool_inside_dest = True
+    except ValueError:
+        pool_inside_dest = False
+    if pool_inside_dest and clean_dest:
+        raise ValueError(
+            f"--output-dir ({dest_resolved}) contains the pool directory "
+            f"({pool_resolved}); refusing to materialize because clean_dest=True "
+            f"would delete the pool. Use a sibling output directory or pass "
+            f"clean_dest=False."
+        )
+
     with mp.open() as f:
         manifest = json.load(f)
     pool_b = manifest.get("bacterial") or []

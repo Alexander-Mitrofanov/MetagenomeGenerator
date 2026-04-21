@@ -55,6 +55,37 @@ def _parse_title(record: dict) -> str:
     return str(raw).strip() if raw else ""
 
 
+def _esummary_batch_with_retries(
+    id_str: str,
+    *,
+    max_retries: int,
+    batch_label: str,
+) -> list | None:
+    """Run a single esummary call with bounded retries.
+
+    Returns the parsed records on success, or None if all attempts failed. The
+    caller is responsible for rate-limiting between batches. Any other exception
+    path (e.g. zero attempts) also returns None so callers just skip the batch.
+    """
+    for attempt in range(max_retries):
+        try:
+            handle = Entrez.esummary(db="nucleotide", id=id_str)
+            records = Entrez.read(handle)
+            handle.close()
+            return list(records)
+        except Exception as e:
+            logger.warning(
+                "esummary %s attempt %d/%d failed: %s",
+                batch_label,
+                attempt + 1,
+                max_retries,
+                e,
+            )
+            if attempt < max_retries - 1:
+                time.sleep(ESUMMARY_RETRY_SLEEP * (attempt + 1))
+    return None
+
+
 def fetch_accession_metadata(
     accessions: list[str],
     *,
@@ -76,19 +107,12 @@ def fetch_accession_metadata(
         batch_idx = i // batch_size
         id_str = ",".join(batch)
         time.sleep(ESUMMARY_SLEEP)
-        for attempt in range(max_retries):
-            try:
-                handle = Entrez.esummary(db="nucleotide", id=id_str)
-                records = Entrez.read(handle)
-                handle.close()
-                break
-            except Exception as e:
-                logger.warning("esummary batch %d/%d attempt %d failed: %s", batch_idx + 1, total_batches, attempt + 1, e)
-                if attempt < max_retries - 1:
-                    time.sleep(ESUMMARY_RETRY_SLEEP * (attempt + 1))
-                else:
-                    continue
-        else:
+        records = _esummary_batch_with_retries(
+            id_str,
+            max_retries=max_retries,
+            batch_label=f"batch {batch_idx + 1}/{total_batches}",
+        )
+        if records is None:
             continue
         for rec in records:
             acc = rec.get("AccessionVersion") or rec.get("Caption") or str(rec.get("Id", ""))
@@ -108,22 +132,28 @@ def fetch_accession_dates(
     accessions: list[str],
     *,
     batch_size: int = ESUMMARY_BATCH_SIZE,
+    max_retries: int = ESUMMARY_MAX_RETRIES,
 ) -> dict[str, str]:
     """Fetch NCBI nucleotide CreateDate for each accession via esummary.
 
     Returns dict accession_id -> "YYYY/MM/DD". Missing or failed IDs are absent.
+    Transient NCBI failures are retried up to ``max_retries`` times per batch
+    before the batch is skipped; previously a single flake would drop hundreds
+    of accessions from a temporal split.
     """
     result: dict[str, str] = {}
+    total_batches = (len(accessions) + batch_size - 1) // batch_size
     for i in range(0, len(accessions), batch_size):
         batch = accessions[i : i + batch_size]
+        batch_idx = i // batch_size
         id_str = ",".join(batch)
         time.sleep(ESUMMARY_SLEEP)
-        try:
-            handle = Entrez.esummary(db="nucleotide", id=id_str)
-            records = Entrez.read(handle)
-            handle.close()
-        except Exception as e:
-            logger.warning("esummary batch failed for %d IDs: %s", len(batch), e)
+        records = _esummary_batch_with_retries(
+            id_str,
+            max_retries=max_retries,
+            batch_label=f"batch {batch_idx + 1}/{total_batches} ({len(batch)} IDs)",
+        )
+        if records is None:
             continue
         # esummary returns list of dicts; use AccessionVersion or Caption to match our IDs
         for rec in records:
@@ -177,15 +207,21 @@ def split_ids_by_date(
 
 
 def _validate_split_date(s: str) -> None:
-    """Raise ValueError if s is not YYYY-MM-DD."""
+    """Raise ValueError if s is not a valid calendar date in YYYY-MM-DD form.
+
+    Uses :func:`datetime.date.fromisoformat` so impossible dates like
+    ``2025-02-31`` or ``2023-13-01`` are rejected. The previous hand-rolled
+    check only validated the ``1<=m<=12``, ``1<=d<=31`` ranges and happily
+    accepted Feb 31st, which would then compare lexicographically against
+    NCBI CreateDate strings and silently produce an off-by-month split.
+    """
     if len(s) != 10 or s[4] != "-" or s[7] != "-":
         raise ValueError(f"split_date must be YYYY-MM-DD, got: {s!r}")
     try:
-        y, m, d = int(s[:4]), int(s[5:7]), int(s[8:10])
-        if not (1 <= m <= 12 and 1 <= d <= 31):
-            raise ValueError("invalid month or day")
+        from datetime import date as _date
+        _date.fromisoformat(s)
     except (ValueError, TypeError) as e:
-        raise ValueError(f"split_date must be YYYY-MM-DD, got: {s!r}") from e
+        raise ValueError(f"split_date must be a valid YYYY-MM-DD date, got: {s!r}") from e
 
 
 def run_temporal_split_info(

@@ -205,14 +205,24 @@ def _download_category_batched(
                 logger.info("Download: accession=%s origin=%s path=%s", to_fetch[j], category_label, path)
                 SeqIO.write([rec], path, "fasta")
         except Exception as e:
+            logger.warning(
+                "Batch fetch failed for %s batch (size=%d, start=%d): %s; falling back to per-ID",
+                category_label, len(to_fetch), start, e,
+            )
             for gid in to_fetch:
-                print(f"Fetching {category_label}: {gid} -> {gid}.fasta")
-                logger.info("Download: accession=%s origin=%s", gid, category_label)
                 time.sleep(0.4)
                 try:
                     records = fetch_sequences([gid])
+                    # Align the fallback log with the batch-success branch: print the
+                    # final on-disk filename (which may differ from the requested ID
+                    # if NCBI returned a different accession/version). Previously we
+                    # printed "{gid} -> {gid}.fasta" before the fetch, which was
+                    # cosmetically inconsistent and also lied when the record id
+                    # normalized differently.
                     acc = records[0].id.split()[0]
                     path = out_dir / f"{acc}.fasta"
+                    print(f"Fetching {category_label}: {gid} -> {path.name}")
+                    logger.info("Download: accession=%s origin=%s path=%s", gid, category_label, path)
                     SeqIO.write(records, path, "fasta")
                 except Exception as e2:
                     print(f"  Warning: failed to fetch {gid}: {e2}")

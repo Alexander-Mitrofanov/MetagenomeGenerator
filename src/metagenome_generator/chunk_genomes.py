@@ -94,13 +94,33 @@ def _apply_viral_taxonomy_balance(
         prefix_to_max_reads = {p: max_r for p, _fp, _tb, max_r in stats}
     # Group virus prefixes by taxonomy
     groups: dict[str, list[str]] = {}
+    viral_prefixes: list[str] = []
     for prefix, fp in prefixes_and_files:
         if _category_from_path(fp) != "virus":
             continue
+        viral_prefixes.append(prefix)
         group = viral_taxonomy.get(prefix, "unknown")
         groups.setdefault(group, []).append(prefix)
     if not groups:
         return read_limits
+    # Warn when the taxonomy JSON fails to cover the viral prefixes — a common
+    # silent failure mode is an accession-format mismatch (e.g. JSON keyed by
+    # versioned IDs like "NC_001798.2" while file stems are unversioned, or
+    # the reverse). Without this warning, every virus collapses into the
+    # "unknown" bucket and balancing becomes a no-op.
+    if viral_prefixes:
+        unknown_viral = len(groups.get("unknown", []))
+        unknown_frac = unknown_viral / len(viral_prefixes)
+        if unknown_frac >= 0.5:
+            missing_sample = [p for p in viral_prefixes if viral_taxonomy.get(p, "unknown") == "unknown"][:3]
+            sample_keys = list(viral_taxonomy.keys())[:3]
+            logger.warning(
+                "Viral taxonomy balance: %d/%d viral prefixes (%.1f%%) are unmapped and fell into 'unknown'. "
+                "Check that the keys in --viral-taxonomy match file stems. "
+                "Unmapped example prefixes: %s. Example taxonomy keys: %s.",
+                unknown_viral, len(viral_prefixes), 100.0 * unknown_frac,
+                missing_sample, sample_keys,
+            )
     # Target per group = min over groups of (sum of max_reads in group)
     total_per_group = {}
     for group, prefs in groups.items():
@@ -121,6 +141,55 @@ def _apply_viral_taxonomy_balance(
         per_file = max(1, target_total // len(prefs))
         result[i] = min(max_r, per_file) if max_r else result[i]
     return result
+
+
+def _compute_coverage_read_limits(
+    prefixes_and_files: list[tuple[str, Path]],
+    coverage: float,
+    effective_read_length: int,
+    *,
+    coverage_cv: float = 0.0,
+    abundance_profile: dict[str, float] | None = None,
+    seed: int | None = None,
+) -> list[int]:
+    """Return per-file read counts derived from a target coverage.
+
+    For each input file, compute ``ceil(total_bp * per_file_coverage /
+    read_length)``. When ``coverage_cv > 0``, per-file coverage is drawn from
+    a log-normal with mean ≈ ``coverage`` and coefficient of variation
+    ``coverage_cv`` so different genomes get different depths (models real
+    metagenomic sequencing, where coverage is uneven across organisms).
+    Returns at least 1 read per file (genomes shorter than the read length
+    still contribute one attempted read which is skipped downstream if it
+    doesn't fit; ensures no genome is silently dropped).
+    """
+    if effective_read_length <= 0:
+        raise ValueError("effective_read_length must be > 0")
+    rng = random.Random(seed)
+    limits: list[int] = []
+    # LogNormal parameters: sigma chosen so the coefficient of variation of
+    # exp(N(mu, sigma)) equals ``coverage_cv``; mu set so E[X] == 1 (a pure
+    # multiplier applied to ``coverage``). Formulas:
+    #   CV = sqrt(exp(sigma^2) - 1)  =>  sigma^2 = log(CV^2 + 1)
+    #   E[X] = exp(mu + sigma^2 / 2) == 1  =>  mu = -sigma^2 / 2
+    if coverage_cv > 0:
+        sigma2 = math.log(coverage_cv * coverage_cv + 1.0)
+        sigma = math.sqrt(sigma2)
+        mu = -sigma2 / 2.0
+    else:
+        sigma = 0.0
+        mu = 0.0
+    for _prefix, fp in prefixes_and_files:
+        total_bp = sum(len(rec.seq) for rec in SeqIO.parse(fp, "fasta"))
+        cov = coverage
+        if sigma > 0:
+            cov = coverage * math.exp(rng.gauss(mu, sigma))
+        if abundance_profile is not None:
+            cat = _category_from_path(fp)
+            cov *= abundance_profile.get(cat, 1.0)
+        n_reads = max(1, int(math.ceil(total_bp * cov / effective_read_length)))
+        limits.append(n_reads)
+    return limits
 
 
 def _compute_read_limits(
@@ -160,6 +229,29 @@ BASES = "ACGT"
 ILLUMINA_BASE_ERROR = 0.001   # ~0.1% at start of read
 ILLUMINA_END_ERROR = 0.012    # ~1.2% toward end (typical for 250 bp)
 
+# 3rd-generation sequencing error profiles (per-base rates). Values are
+# representative of contemporary (~2023–2025) platforms and are intentionally
+# conservative so synthetic datasets remain usable for classifier training.
+# Nanopore R10: substitution-dominated overall error ~4–5%, indels mostly at
+# homopolymers; PacBio HiFi (CCS) is very accurate (~0.3% total); PacBio CLR is
+# high-error with indel parity.
+NANOPORE_SUB_RATE = 0.025
+NANOPORE_INS_RATE = 0.015
+NANOPORE_DEL_RATE = 0.015
+NANOPORE_HOMOPOLYMER_MULT = 2.5   # inflate error rate inside homopolymer runs (>=3 bases)
+NANOPORE_HOMOPOLYMER_MIN_RUN = 3
+
+PACBIO_HIFI_SUB_RATE = 0.002
+PACBIO_HIFI_INS_RATE = 0.0005
+PACBIO_HIFI_DEL_RATE = 0.0005
+
+PACBIO_CLR_SUB_RATE = 0.013
+PACBIO_CLR_INS_RATE = 0.055
+PACBIO_CLR_DEL_RATE = 0.055
+
+THIRD_GEN_ERROR_MODELS = ("nanopore", "pacbio-hifi", "pacbio-clr")
+ALL_ERROR_MODELS = ("illumina",) + THIRD_GEN_ERROR_MODELS
+
 # Contig-quality presets inspired by real metagenome benchmarks:
 # low/medium/high bins map to different length ranges and weights.
 CONTIG_QUALITY_PRESETS: dict[str, list[tuple[int, int, float]]] = {
@@ -176,7 +268,17 @@ def normalize_train_split_percent(train_split: float) -> float:
     Accepts either:
     - percentage in [0, 100], e.g. 80
     - fraction in (0, 1], e.g. 0.8 (interpreted as 80%)
+
+    The exact value ``1.0`` is ambiguous (could mean "100%" or "1%"); we follow
+    the fraction branch and return ``100.0``, but emit a warning so users who
+    meant "1%" realize their mistake. Pass ``1`` (int) or ``1.01``/``0.99`` to
+    avoid the warning.
     """
+    if train_split == 1.0 and isinstance(train_split, float):
+        logger.warning(
+            "train_test_split=1.0 is ambiguous; interpreting as 100%% (full train). "
+            "If you meant 1%%, pass 0.01. If you meant 100%%, pass 100 to silence this warning."
+        )
     if 0.0 < train_split <= 1.0:
         return train_split * 100.0
     return train_split
@@ -283,14 +385,207 @@ def _apply_mutations_to_record(
     return SeqRecord(Seq(new_seq), id=rec.id, description=rec.description)
 
 
+def _apply_third_gen_errors(
+    seq_str: str,
+    rng: random.Random,
+    *,
+    sub_rate: float,
+    ins_rate: float,
+    del_rate: float,
+    homopolymer_mult: float = 1.0,
+    homopolymer_min_run: int = 3,
+) -> str:
+    """Apply long-read (nanopore / PacBio) error patterns to a sequence.
+
+    - Substitutions, insertions, and deletions are applied per-base with
+      independent rates.
+    - When ``homopolymer_mult > 1`` the per-base rates are multiplied inside
+      homopolymer runs of length >= ``homopolymer_min_run`` to emulate the
+      well-known nanopore basecaller weakness there.
+    - Output length can differ from input (indel-dependent).
+    - Uses ``rng`` for reproducibility.
+    """
+    if sub_rate <= 0 and ins_rate <= 0 and del_rate <= 0:
+        return seq_str
+    seq_str = seq_str.upper()
+    L = len(seq_str)
+    if L == 0:
+        return seq_str
+
+    # Precompute homopolymer-run lengths so each base knows whether it sits
+    # inside a qualifying run. Walking once in O(L) beats recomputing inside
+    # the hot loop, which matters for long reads (~10 kb typical nanopore).
+    run_lengths: list[int] = [0] * L
+    if homopolymer_mult > 1.0 and homopolymer_min_run >= 2:
+        i = 0
+        while i < L:
+            j = i
+            while j + 1 < L and seq_str[j + 1] == seq_str[i]:
+                j += 1
+            run_len = j - i + 1
+            for k in range(i, j + 1):
+                run_lengths[k] = run_len
+            i = j + 1
+
+    out: list[str] = []
+    for i, c in enumerate(seq_str):
+        if c not in BASES:
+            out.append(c)
+            continue
+        mult = (
+            homopolymer_mult
+            if (homopolymer_mult > 1.0 and run_lengths[i] >= homopolymer_min_run)
+            else 1.0
+        )
+        eff_ins = min(1.0, ins_rate * mult)
+        eff_del = min(1.0, del_rate * mult)
+        eff_sub = min(1.0, sub_rate * mult)
+        # Insertion (before the current base) — duplicates the current base with
+        # probability 0.5 (typical long-read bias) else a random base.
+        if eff_ins > 0 and rng.random() < eff_ins:
+            out.append(c if rng.random() < 0.5 else rng.choice(BASES))
+        # Deletion
+        if eff_del > 0 and rng.random() < eff_del:
+            continue
+        # Substitution
+        if eff_sub > 0 and rng.random() < eff_sub:
+            others = [b for b in BASES if b != c]
+            out.append(rng.choice(others) if others else c)
+        else:
+            out.append(c)
+    return "".join(out)
+
+
+def _introduce_chimeras(
+    records: list[SeqRecord],
+    chimera_rate: float,
+    rng: random.Random,
+) -> tuple[list[SeqRecord], int]:
+    """Replace a fraction of records with two-parent chimeras.
+
+    Returns (new_records, n_chimeras). Each chimera glues the 5' half of one
+    parent to the 3' half of a different parent (random pick), tagged with
+    ``chimera=parentA|parentB`` in the description for traceability. The
+    overall list length is preserved so downstream read counts match user
+    expectation (``chimera_rate`` = fraction of emitted reads that are
+    chimeric). Needs at least 2 records and ``chimera_rate > 0`` to do
+    anything.
+    """
+    if chimera_rate <= 0 or len(records) < 2:
+        return records, 0
+    chimera_rate = min(1.0, chimera_rate)
+    n = len(records)
+    n_chimeras = int(round(n * chimera_rate))
+    if n_chimeras == 0:
+        return records, 0
+    indices = list(range(n))
+    rng.shuffle(indices)
+    to_replace = set(indices[:n_chimeras])
+    out: list[SeqRecord] = list(records)
+    for idx in to_replace:
+        parent_a = records[idx]
+        # Pick a different parent; fall back to any parent if degenerate
+        candidates = [i for i in range(n) if i != idx]
+        parent_b_idx = rng.choice(candidates)
+        parent_b = records[parent_b_idx]
+        seq_a = str(parent_a.seq)
+        seq_b = str(parent_b.seq)
+        split_a = len(seq_a) // 2
+        split_b = len(seq_b) // 2
+        new_seq = seq_a[:split_a] + seq_b[split_b:]
+        chimera = SeqRecord(
+            Seq(new_seq),
+            id=f"chimera_{idx}",
+            description=f"chimera parents={parent_a.id}|{parent_b.id}",
+        )
+        # Preserve Phred quality when upstream records have it, so FASTQ still
+        # works. We concatenate the matching halves of parents' qualities.
+        qa = parent_a.letter_annotations.get("phred_quality")
+        qb = parent_b.letter_annotations.get("phred_quality")
+        if qa is not None and qb is not None:
+            chimera.letter_annotations["phred_quality"] = list(qa[:split_a]) + list(qb[split_b:])
+        out[idx] = chimera
+    return out, n_chimeras
+
+
+def _introduce_pcr_duplicates(
+    records: list[SeqRecord],
+    duplicate_rate: float,
+    rng: random.Random,
+) -> tuple[list[SeqRecord], int]:
+    """Append PCR-like duplicates to the record list.
+
+    Each record is independently duplicated with probability
+    ``duplicate_rate``; duplicates get ``_dup`` appended to their id and
+    ``pcr_duplicate=true`` in the description. Returns (new_records,
+    n_duplicates_added). The duplicate is bit-identical to the source; callers
+    that want slight mutations on duplicates should apply an error model
+    first (before this call).
+    """
+    if duplicate_rate <= 0 or not records:
+        return records, 0
+    duplicate_rate = min(1.0, duplicate_rate)
+    out = list(records)
+    dup_counter = 0
+    for rec in records:
+        if rng.random() < duplicate_rate:
+            dup_counter += 1
+            dup = SeqRecord(
+                Seq(str(rec.seq)),
+                id=f"{rec.id}_dup",
+                description=(f"{rec.description} pcr_duplicate=true" if rec.description else "pcr_duplicate=true"),
+            )
+            q = rec.letter_annotations.get("phred_quality")
+            if q is not None:
+                dup.letter_annotations["phred_quality"] = list(q)
+            out.append(dup)
+    return out, dup_counter
+
+
 def _apply_error_model_to_record(
     rec: SeqRecord,
     error_model: str,
     rng: random.Random,
 ) -> SeqRecord:
-    """Apply platform-specific error model (e.g. Illumina) to a record. Preserves id and description."""
+    """Apply platform-specific error model to a record. Preserves id and description.
+
+    Supported models:
+
+    - ``illumina`` — position-dependent substitution only (short-read).
+    - ``nanopore`` — substitutions + indels with homopolymer inflation.
+    - ``pacbio-hifi`` — low-error substitution-biased (CCS-like).
+    - ``pacbio-clr`` — high-error, indel-heavy continuous long reads.
+    """
     if error_model == "illumina":
         new_seq = _apply_illumina_like_errors(str(rec.seq), rng)
+    elif error_model == "nanopore":
+        new_seq = _apply_third_gen_errors(
+            str(rec.seq),
+            rng,
+            sub_rate=NANOPORE_SUB_RATE,
+            ins_rate=NANOPORE_INS_RATE,
+            del_rate=NANOPORE_DEL_RATE,
+            homopolymer_mult=NANOPORE_HOMOPOLYMER_MULT,
+            homopolymer_min_run=NANOPORE_HOMOPOLYMER_MIN_RUN,
+        )
+    elif error_model == "pacbio-hifi":
+        new_seq = _apply_third_gen_errors(
+            str(rec.seq),
+            rng,
+            sub_rate=PACBIO_HIFI_SUB_RATE,
+            ins_rate=PACBIO_HIFI_INS_RATE,
+            del_rate=PACBIO_HIFI_DEL_RATE,
+            homopolymer_mult=1.0,
+        )
+    elif error_model == "pacbio-clr":
+        new_seq = _apply_third_gen_errors(
+            str(rec.seq),
+            rng,
+            sub_rate=PACBIO_CLR_SUB_RATE,
+            ins_rate=PACBIO_CLR_INS_RATE,
+            del_rate=PACBIO_CLR_DEL_RATE,
+            homopolymer_mult=1.0,
+        )
     else:
         return rec
     return SeqRecord(Seq(new_seq), id=rec.id, description=rec.description)
@@ -307,10 +602,41 @@ def _illumina_phred_at_position(i: int, length: int) -> int:
     return int(min(41, max(0, round(q))))
 
 
-def add_illumina_qualities_to_record(rec: SeqRecord) -> SeqRecord:
-    """Add letter_annotations['phred_quality'] to a SeqRecord (Illumina-like position-dependent). Returns same record, modified in place."""
+def _phred_from_rate(rate: float) -> int:
+    """Convert a per-base error rate to a flat Phred quality score (clamped 0..60)."""
+    rate = max(1e-10, min(1.0, rate))
+    q = -10.0 * math.log10(rate)
+    return int(min(60, max(0, round(q))))
+
+
+# Approximate total per-base error rate used to back out a flat Phred score for
+# 3rd-generation platforms. Keep in sync with the ``*_SUB_RATE/INS_RATE/DEL_RATE``
+# constants above; we sum rather than compound because real basecallers report
+# error as an additive "total". Illumina keeps the position-dependent curve.
+_ERROR_MODEL_FLAT_RATE = {
+    "nanopore": NANOPORE_SUB_RATE + NANOPORE_INS_RATE + NANOPORE_DEL_RATE,
+    "pacbio-hifi": PACBIO_HIFI_SUB_RATE + PACBIO_HIFI_INS_RATE + PACBIO_HIFI_DEL_RATE,
+    "pacbio-clr": PACBIO_CLR_SUB_RATE + PACBIO_CLR_INS_RATE + PACBIO_CLR_DEL_RATE,
+}
+
+
+def add_illumina_qualities_to_record(rec: SeqRecord, error_model: str | None = None) -> SeqRecord:
+    """Add ``letter_annotations['phred_quality']`` to a SeqRecord.
+
+    For backward compatibility the default (``error_model=None`` or
+    ``"illumina"``) keeps the position-dependent Illumina-like profile. For
+    3rd-generation models (``nanopore``, ``pacbio-hifi``, ``pacbio-clr``) a
+    flat Phred score derived from the model's total per-base error rate is
+    written — this is a simplification, but matches the long-read convention
+    of reporting mean read quality rather than position-dependent qualities.
+    Returns the same record, modified in place.
+    """
     L = len(rec.seq)
-    rec.letter_annotations["phred_quality"] = [_illumina_phred_at_position(i, L) for i in range(L)]
+    if error_model in _ERROR_MODEL_FLAT_RATE:
+        q = _phred_from_rate(_ERROR_MODEL_FLAT_RATE[error_model])
+        rec.letter_annotations["phred_quality"] = [q] * L
+    else:
+        rec.letter_annotations["phred_quality"] = [_illumina_phred_at_position(i, L) for i in range(L)]
     return rec
 
 
@@ -322,6 +648,7 @@ def chunk_sequence(
     *,
     random_chunk_start: bool = False,
     rng: random.Random | None = None,
+    reads_per_organism: int | None = None,
 ):
     """Split a sequence into non-overlapping fixed-size simulated reads.
 
@@ -332,6 +659,13 @@ def chunk_sequence(
     When random_chunk_start is True, chooses a random offset in [0, chunk_size) so
     reads start at e.g. 17..1017 instead of always 0..1000, while still keeping
     reads non-overlapping (step = chunk_size).
+
+    If ``reads_per_organism`` is set, emission stops after that many reads so the
+    cap matches :func:`chunk_sequence_variable` and
+    :func:`chunk_sequence_quality_profile`. Callers may still apply their own
+    cap on top (e.g. a per-file budget across multi-record FASTAs); this
+    internal cap just prevents direct callers from accidentally consuming the
+    whole genome when they only wanted a few reads.
     """
     seq = record.seq
     start_offset = 0
@@ -343,6 +677,8 @@ def chunk_sequence(
     idx = 0
     start = start_offset
     while start + chunk_size <= len(seq):
+        if reads_per_organism is not None and idx >= reads_per_organism:
+            break
         start, end = start, start + chunk_size
         sub = seq[start:end]
         rec = SeqRecord(
@@ -397,6 +733,76 @@ def chunk_sequence_variable(
         pos = end
         if reads_per_organism is not None and idx >= reads_per_organism:
             break
+
+
+def chunk_sequence_paired(
+    record,
+    prefix: str,
+    read_length: int,
+    insert_size: int,
+    insert_size_sd: float,
+    reads_per_organism: int | None,
+    rng: random.Random | None = None,
+):
+    """Yield (R1, R2) SeqRecord pairs simulating paired-end sequencing.
+
+    The genome is walked in non-overlapping steps of ``insert_size`` (same
+    non-overlapping contract as :func:`chunk_sequence`). For each step, a
+    fragment length ``L`` is drawn from ``Normal(insert_size, insert_size_sd)``
+    and clamped to ``[read_length, insert_size + 3*insert_size_sd]`` (or
+    simply ``read_length`` if ``insert_size_sd <= 0``). R1 is the 5' end of
+    the fragment, R2 is the reverse-complement of the 3' end.
+
+    Record ids use the ``/1`` and ``/2`` Illumina convention. Descriptions
+    carry ``start``/``end``/``insert`` for traceability.
+
+    ``reads_per_organism`` caps the number of emitted **pairs**, matching the
+    semantics of the other chunker helpers (1 "read" in the cap corresponds
+    to 1 fragment / 1 pair in paired mode).
+    """
+    rng = rng or random.Random()
+    seq = record.seq
+    L = len(seq)
+    if read_length <= 0 or insert_size <= 0:
+        return
+    if insert_size < read_length:
+        # Each fragment must fit two non-overlapping reads; otherwise skip.
+        return
+    max_frag = insert_size + int(round(3 * insert_size_sd)) if insert_size_sd > 0 else insert_size
+    step = insert_size
+    idx = 0
+    pos = 0
+    while pos + max_frag <= L:
+        if reads_per_organism is not None and idx >= reads_per_organism:
+            break
+        if insert_size_sd > 0:
+            frag_len = int(round(rng.gauss(insert_size, insert_size_sd)))
+            frag_len = max(read_length, min(frag_len, max_frag))
+        else:
+            frag_len = insert_size
+        if pos + frag_len > L:
+            pos += step
+            continue
+        r1_start = pos
+        r1_end = pos + read_length
+        r2_end = pos + frag_len
+        r2_start = r2_end - read_length
+        r1_seq = seq[r1_start:r1_end]
+        # BioPython's reverse_complement handles any ambiguous bases safely.
+        r2_seq = seq[r2_start:r2_end].reverse_complement()
+        r1 = SeqRecord(
+            r1_seq,
+            id=f"{prefix}_pair_{idx}/1",
+            description=f"start={r1_start} end={r1_end} insert={frag_len} mate=R1",
+        )
+        r2 = SeqRecord(
+            r2_seq,
+            id=f"{prefix}_pair_{idx}/2",
+            description=f"start={r2_start} end={r2_end} insert={frag_len} mate=R2",
+        )
+        yield r1, r2
+        idx += 1
+        pos += step
 
 
 def chunk_sequence_quality_profile(
@@ -480,6 +886,33 @@ def _is_allowed_sequence(rec: SeqRecord, allow_ambiguous: bool) -> bool:
     return all(ch in "ACGT" for ch in seq_str)
 
 
+def _embed_tax_in_description(
+    rec: SeqRecord,
+    cat: str,
+    prefix: str,
+    viral_taxonomy: dict[str, str] | None,
+) -> SeqRecord:
+    """Append ``tax=<group>`` to the record description for gold-standard labels.
+
+    Non-viral categories get ``tax=<category>``. Viral records use
+    ``viral_taxonomy.get(prefix, "unknown")`` so the same JSON produced by the
+    ``viral-taxonomy`` subcommand feeds both balancing and header embedding.
+
+    The original description is preserved (``start=… end=… tax=…``) so
+    downstream parsers that already look for ``start=`` / ``end=`` keep
+    working.
+    """
+    if cat == "virus":
+        group = (viral_taxonomy or {}).get(prefix, "unknown")
+    else:
+        group = cat
+    existing = rec.description or ""
+    # Avoid duplicating the id that BioPython prepends when it writes the file;
+    # we only append once per record.
+    rec.description = f"{existing} tax={group}".strip()
+    return rec
+
+
 def _collect_chunks_for_file(
     fp: Path,
     sequence_length: int,
@@ -497,11 +930,31 @@ def _collect_chunks_for_file(
     error_model: str | None = None,
     mutation_rng: random.Random | None = None,
     random_chunk_start: bool = False,
+    embed_taxonomy: bool = False,
+    viral_taxonomy: dict[str, str] | None = None,
 ) -> list[SeqRecord]:
     """Collect chunks for a single FASTA file (fixed- or variable-length).
 
-    Skips chunks overlapping EVE if eve_intervals is given.
-    If error_model is set (e.g. 'illumina'), applies platform-specific errors; else if substitution_rate or indel_rate > 0, applies uniform mutations.
+    ``reads_per_organism`` is a **per-file** cap shared across every record in a
+    multi-record FASTA (e.g. a multi-segment virus stored as one file). All
+    three chunker helpers now honour the cap consistently:
+
+    - ``chunk_sequence`` (fixed-length) reads the outer budget via
+      ``reads_per_organism`` passed through on each record invocation; this
+      file-level loop also shortcuts as soon as the budget is exhausted, so no
+      record past the limit is opened.
+    - ``chunk_sequence_variable`` and ``chunk_sequence_quality_profile``
+      enforce the same cap internally.
+
+    Chunk IDs are disambiguated across records using a ``_seg{N}`` infix for
+    the 2nd record onward (single-record files keep the plain
+    ``{prefix}_read_{idx}`` naming), so no two chunks from the same file share
+    a header.
+
+    Skips chunks overlapping EVE if ``eve_intervals`` is given. If
+    ``error_model`` is set (e.g. ``'illumina'``) platform-specific errors are
+    applied; else if ``substitution_rate`` or ``indel_rate`` > 0, uniform
+    mutations are applied.
     """
     from .blastn_filter import chunk_overlaps_eve
 
@@ -512,13 +965,23 @@ def _collect_chunks_for_file(
     apply_platform = error_model and mutation_rng is not None
     apply_mutations = not apply_platform and (substitution_rate > 0 or indel_rate > 0) and mutation_rng is not None
 
-    for record in SeqIO.parse(fp, "fasta"):
+    # reads_per_organism is a per-file cap (see CLI help "per input file"). When a
+    # FASTA contains multiple records (multi-segment viruses, multi-contig drafts,
+    # user-supplied multi-record FASTAs), iterate every record but share the budget
+    # across them instead of processing only the first. Record index is only
+    # appended to the prefix from the second record onward so single-record
+    # NCBI downloads keep their historical chunk IDs (``{accession}_read_{idx}``).
+    for rec_idx, record in enumerate(SeqIO.parse(fp, "fasta")):
+        if reads_per_organism is not None and len(chunks) >= reads_per_organism:
+            break
+        remaining = None if reads_per_organism is None else reads_per_organism - len(chunks)
+        record_prefix = prefix if rec_idx == 0 else f"{prefix}_seg{rec_idx}"
         key = (prefix, record.id)
         intervals = eve_intervals.get(key, []) if eve_intervals else []
 
         if contig_quality_profile is not None:
             for item in chunk_sequence_quality_profile(
-                record, prefix, contig_quality_profile, reads_per_organism, rng=rng, yield_coords=use_eve
+                record, record_prefix, contig_quality_profile, remaining, rng=rng, yield_coords=use_eve
             ):
                 if use_eve:
                     rec, start, end = item
@@ -534,10 +997,14 @@ def _collect_chunks_for_file(
                     rec = _apply_error_model_to_record(rec, error_model, mutation_rng)
                 elif apply_mutations:
                     rec = _apply_mutations_to_record(rec, substitution_rate, indel_rate, mutation_rng)
+                if embed_taxonomy:
+                    rec = _embed_tax_in_description(rec, cat, prefix, viral_taxonomy)
                 chunks.append(rec)
+                if reads_per_organism is not None and len(chunks) >= reads_per_organism:
+                    break
         elif min_length is not None and max_length is not None:
             for item in chunk_sequence_variable(
-                record, prefix, min_length, max_length, reads_per_organism, rng=rng, yield_coords=use_eve
+                record, record_prefix, min_length, max_length, remaining, rng=rng, yield_coords=use_eve
             ):
                 if use_eve:
                     rec, start, end = item
@@ -553,19 +1020,23 @@ def _collect_chunks_for_file(
                     rec = _apply_error_model_to_record(rec, error_model, mutation_rng)
                 elif apply_mutations:
                     rec = _apply_mutations_to_record(rec, substitution_rate, indel_rate, mutation_rng)
+                if embed_taxonomy:
+                    rec = _embed_tax_in_description(rec, cat, prefix, viral_taxonomy)
                 chunks.append(rec)
+                if reads_per_organism is not None and len(chunks) >= reads_per_organism:
+                    break
         else:
             for i, item in enumerate(
                 chunk_sequence(
                     record,
-                    prefix,
+                    record_prefix,
                     sequence_length,
                     yield_coords=use_eve,
                     random_chunk_start=random_chunk_start,
                     rng=rng,
                 )
             ):
-                if reads_per_organism is not None and i >= reads_per_organism:
+                if remaining is not None and i >= remaining:
                     break
                 if use_eve:
                     rec, start, end = item
@@ -581,8 +1052,11 @@ def _collect_chunks_for_file(
                     rec = _apply_error_model_to_record(rec, error_model, mutation_rng)
                 elif apply_mutations:
                     rec = _apply_mutations_to_record(rec, substitution_rate, indel_rate, mutation_rng)
+                if embed_taxonomy:
+                    rec = _embed_tax_in_description(rec, cat, prefix, viral_taxonomy)
                 chunks.append(rec)
-        break
+                if reads_per_organism is not None and len(chunks) >= reads_per_organism:
+                    break
     return chunks
 
 
@@ -602,6 +1076,8 @@ def _collect_chunks_from_multirecord_fasta(
     error_model: str | None = None,
     category_label: str = "virus",
     random_chunk_start: bool = False,
+    embed_taxonomy: bool = False,
+    viral_taxonomy: dict[str, str] | None = None,
 ) -> list[SeqRecord]:
     """Collect chunks from a multi-record FASTA (e.g. metavirome contigs). No EVE filtering.
 
@@ -630,6 +1106,8 @@ def _collect_chunks_from_multirecord_fasta(
                     rec = _apply_error_model_to_record(rec, error_model, file_mutation_rng)
                 elif apply_mutations:
                     rec = _apply_mutations_to_record(rec, substitution_rate, indel_rate, file_mutation_rng)
+                if embed_taxonomy:
+                    rec = _embed_tax_in_description(rec, category_label, prefix, viral_taxonomy)
                 chunks.append(rec)
         elif min_length is not None and max_length is not None:
             for item in chunk_sequence_variable(
@@ -643,6 +1121,8 @@ def _collect_chunks_from_multirecord_fasta(
                     rec = _apply_error_model_to_record(rec, error_model, file_mutation_rng)
                 elif apply_mutations:
                     rec = _apply_mutations_to_record(rec, substitution_rate, indel_rate, file_mutation_rng)
+                if embed_taxonomy:
+                    rec = _embed_tax_in_description(rec, category_label, prefix, viral_taxonomy)
                 chunks.append(rec)
         else:
             for i, rec in enumerate(
@@ -664,6 +1144,8 @@ def _collect_chunks_from_multirecord_fasta(
                     rec = _apply_error_model_to_record(rec, error_model, file_mutation_rng)
                 elif apply_mutations:
                     rec = _apply_mutations_to_record(rec, substitution_rate, indel_rate, file_mutation_rng)
+                if embed_taxonomy:
+                    rec = _embed_tax_in_description(rec, category_label, prefix, viral_taxonomy)
                 chunks.append(rec)
     return chunks
 
@@ -699,6 +1181,11 @@ def build_metagenome(
     output_fastq: bool = False,
     write_abundance: bool = False,
     random_chunk_start: bool = False,
+    embed_taxonomy: bool = False,
+    chimera_rate: float = 0.0,
+    pcr_duplicate_rate: float = 0.0,
+    coverage: float | None = None,
+    coverage_cv: float = 0.0,
 ) -> int | tuple[int, list[SeqRecord]]:
     """Build a metagenome FASTA from input_path. Fixed-length or variable-length contigs.
 
@@ -751,7 +1238,31 @@ def build_metagenome(
         if reads_per_organism_gen == 0:
             reads_per_organism_gen = reads_per_organism
 
-    if reads_per_organism_gen is None:
+    if coverage is not None and coverage > 0:
+        # Coverage-driven mode: derive per-file read counts from genome length
+        # and coverage. This overrides ``reads_per_organism`` (which is still
+        # honoured as an upper cap per file after the coverage calculation so
+        # users can safely combine ``--coverage`` with ``--reads-per-organism``
+        # as a safety valve). When ``filter_similar`` is on we multiply by the
+        # oversample factor here so the downstream filter has enough
+        # candidates to choose from.
+        eff_read_len = sequence_length
+        if contig_quality_profile is not None:
+            eff_read_len = contig_quality_profile_mean_length(contig_quality_profile)
+        elif min_length is not None and max_length is not None:
+            eff_read_len = (min_length + max_length) // 2
+        eff_coverage = coverage * oversample_factor if filter_similar else coverage
+        read_limits = _compute_coverage_read_limits(
+            prefixes_and_files,
+            eff_coverage,
+            max(1, eff_read_len),
+            coverage_cv=coverage_cv,
+            abundance_profile=abundance_profile,
+            seed=seed,
+        )
+        if reads_per_organism is not None:
+            read_limits = [min(rl, reads_per_organism) for rl in read_limits]
+    elif reads_per_organism_gen is None:
         read_limits: list[int | None] = [None] * num_files
     else:
         read_limits = _compute_read_limits(
@@ -762,26 +1273,30 @@ def build_metagenome(
             seed=seed,
         )
 
-    if viral_taxonomy_json and viral_taxonomy_json.is_file() and balance_viral_by_taxonomy:
+    # Load viral taxonomy once when needed for either balancing or
+    # ``--embed-taxonomy`` header tagging, so we don't parse the JSON twice.
+    viral_tax: dict[str, str] | None = None
+    if viral_taxonomy_json and viral_taxonomy_json.is_file() and (balance_viral_by_taxonomy or embed_taxonomy):
         from .viral_taxonomy import load_viral_taxonomy
-        viral_tax = load_viral_taxonomy(viral_taxonomy_json)
-        if viral_tax:
-            # Reuse single get_file_stats result for balance (avoids re-scanning all FASTAs)
-            stats = get_file_stats(
-                input_path,
-                sequence_length,
-                min_length=min_length,
-                max_length=max_length,
-                contig_quality_profile=contig_quality_profile,
-            )
-            prefix_to_max_reads = {p: max_r for p, _fp, _tb, max_r in stats} if stats else {}
-            read_limits = _apply_viral_taxonomy_balance(
-                prefixes_and_files,
-                read_limits,
-                viral_tax,
-                prefix_to_max_reads=prefix_to_max_reads,
-            )
-            logger.info("Viral taxonomy balance: applied for %d viral prefixes", len(viral_tax))
+        viral_tax = load_viral_taxonomy(viral_taxonomy_json) or None
+
+    if viral_tax and balance_viral_by_taxonomy:
+        # Reuse single get_file_stats result for balance (avoids re-scanning all FASTAs)
+        stats = get_file_stats(
+            input_path,
+            sequence_length,
+            min_length=min_length,
+            max_length=max_length,
+            contig_quality_profile=contig_quality_profile,
+        )
+        prefix_to_max_reads = {p: max_r for p, _fp, _tb, max_r in stats} if stats else {}
+        read_limits = _apply_viral_taxonomy_balance(
+            prefixes_and_files,
+            read_limits,
+            viral_tax,
+            prefix_to_max_reads=prefix_to_max_reads,
+        )
+        logger.info("Viral taxonomy balance: applied for %d viral prefixes", len(viral_tax))
 
     all_chunks: list[SeqRecord] = []
     for i, (prefix, fp) in enumerate(prefixes_and_files):
@@ -804,6 +1319,8 @@ def build_metagenome(
             error_model=error_model,
             mutation_rng=file_mutation_rng,
             random_chunk_start=random_chunk_start,
+            embed_taxonomy=embed_taxonomy,
+            viral_taxonomy=viral_tax,
         )
         all_chunks.extend(chunks)
 
@@ -824,6 +1341,8 @@ def build_metagenome(
             error_model=error_model,
             category_label="virus",
             random_chunk_start=random_chunk_start,
+            embed_taxonomy=embed_taxonomy,
+            viral_taxonomy=viral_tax,
         )
         all_chunks.extend(extra_chunks)
         logger.info("Extra viral FASTA: added %d chunks from %s", len(extra_chunks), extra_viral_fasta)
@@ -872,6 +1391,8 @@ def build_metagenome(
                     error_model=error_model,
                     mutation_rng=file_mutation_rng,
                     random_chunk_start=random_chunk_start,
+                    embed_taxonomy=embed_taxonomy,
+                    viral_taxonomy=viral_tax,
                 )
                 more_chunks.extend(chunks)
             if not more_chunks:
@@ -901,6 +1422,27 @@ def build_metagenome(
         if cap_total_reads is not None and len(all_chunks) > cap_total_reads:
             rng = random.Random(seed)
             all_chunks = rng.sample(all_chunks, cap_total_reads)
+
+    # Library-prep artefacts (chimeras + PCR duplicates). Applied last so they
+    # compose with every other upstream feature (coverage, error models,
+    # similarity filter, train/test). We derive a dedicated sub-seed so the
+    # injection is reproducible without perturbing the chunking RNG stream
+    # consumed above. The chimera pass runs first because PCR duplication then
+    # replicates the already-chimeric reads, matching real wet-lab artefact
+    # ordering (fragmentation → PCR amplification).
+    if chimera_rate > 0 or pcr_duplicate_rate > 0:
+        artefact_seed = (seed + 40000) if seed is not None else None
+        artefact_rng = random.Random(artefact_seed) if artefact_seed is not None else random.Random()
+        if chimera_rate > 0:
+            all_chunks, n_chim = _introduce_chimeras(all_chunks, chimera_rate, artefact_rng)
+            logger.info("Chimera injection: replaced %d / %d reads (rate=%.3f)", n_chim, len(all_chunks), chimera_rate)
+        if pcr_duplicate_rate > 0:
+            before = len(all_chunks)
+            all_chunks, n_dup = _introduce_pcr_duplicates(all_chunks, pcr_duplicate_rate, artefact_rng)
+            logger.info(
+                "PCR duplicates: added %d duplicate reads (rate=%.3f, base=%d -> %d)",
+                n_dup, pcr_duplicate_rate, before, len(all_chunks),
+            )
 
     def _write_abundance_file(records: list[SeqRecord], path: Path) -> None:
         """Write genome_id, read_count, proportion to a tab-separated file (ground-truth for benchmarking)."""
@@ -934,11 +1476,11 @@ def build_metagenome(
     if return_records:
         if output_fastq:
             for rec in all_chunks:
-                add_illumina_qualities_to_record(rec)
+                add_illumina_qualities_to_record(rec, error_model=error_model)
         return len(all_chunks), all_chunks
     if output_fastq:
         for rec in all_chunks:
-            add_illumina_qualities_to_record(rec)
+            add_illumina_qualities_to_record(rec, error_model=error_model)
         write_path = out_path if out_path.suffix.lower() == ".fastq" else out_path.with_suffix(".fastq")
         count = SeqIO.write(all_chunks, write_path, "fastq")
         if write_abundance:
@@ -948,6 +1490,470 @@ def build_metagenome(
     if write_abundance:
         _write_abundance_file(all_chunks, out_path.with_stem(out_path.stem + "_abundance").with_suffix(".txt"))
     return int(count)
+
+
+def parse_multi_length_spec(spec: str) -> list[int]:
+    """Parse a comma-separated multi-length spec like ``"300,500,1000,3000"``.
+
+    Returns a list of unique positive integers preserving input order. Raises
+    ``ValueError`` on empty input, non-integer tokens, or non-positive values.
+    """
+    if not spec or not spec.strip():
+        raise ValueError("multi-length spec must be a non-empty comma-separated list, e.g. '300,500,1000,3000'")
+    tokens = [t.strip() for t in spec.split(",") if t.strip()]
+    if not tokens:
+        raise ValueError("multi-length spec contains no lengths after splitting on commas")
+    lengths: list[int] = []
+    seen: set[int] = set()
+    for tok in tokens:
+        try:
+            value = int(tok)
+        except ValueError as exc:
+            raise ValueError(f"multi-length token {tok!r} is not an integer") from exc
+        if value <= 0:
+            raise ValueError(f"multi-length value {value} must be > 0")
+        if value in seen:
+            continue
+        seen.add(value)
+        lengths.append(value)
+    return lengths
+
+
+def build_metagenome_multi_length(
+    input_path: Path,
+    out_path: Path,
+    lengths: list[int],
+    reads_per_organism: int | None,
+    **kwargs,
+) -> list[tuple[int, int, Path]]:
+    """Write one metagenome output per sequence length.
+
+    Calls :func:`build_metagenome` once per entry in ``lengths``, writing to
+    ``{stem}_L{N}{suffix}`` (e.g. ``metagenome.fasta`` with lengths
+    ``[300, 500]`` produces ``metagenome_L300.fasta`` and
+    ``metagenome_L500.fasta``). ``kwargs`` are forwarded to each call.
+    Returns a list of ``(length, written_count, written_path)`` tuples
+    (path uses ``.fastq`` when ``output_fastq=True``).
+
+    Intentionally does *not* support ``return_records=True`` or
+    variable-length modes (``min_length``/``max_length``/
+    ``contig_quality_profile``) — multi-length is defined as fixed-length
+    reads of each requested size, and each length would otherwise produce
+    its own record list that isn't meaningful to merge.
+    """
+    if not lengths:
+        raise ValueError("build_metagenome_multi_length requires at least one length")
+    if kwargs.get("return_records"):
+        raise ValueError("build_metagenome_multi_length does not support return_records=True")
+    for incompat in ("min_length", "max_length", "contig_quality_profile"):
+        if kwargs.get(incompat) is not None:
+            raise ValueError(
+                f"build_metagenome_multi_length: {incompat!r} is incompatible with multi-length (fixed-length only)"
+            )
+    results: list[tuple[int, int, Path]] = []
+    output_fastq = bool(kwargs.get("output_fastq"))
+    stem = out_path.stem
+    suffix = ".fastq" if output_fastq else (out_path.suffix if out_path.suffix else ".fasta")
+    for length in lengths:
+        per_length_name = f"{stem}_L{length}{suffix}"
+        per_length_path = out_path.with_name(per_length_name)
+        count = build_metagenome(
+            input_path,
+            per_length_path,
+            length,
+            reads_per_organism,
+            **kwargs,
+        )
+        if isinstance(count, tuple):
+            count = count[0]
+        results.append((length, int(count), per_length_path))
+        logger.info("Multi-length: wrote %d reads of length %d to %s", int(count), length, per_length_path)
+    return results
+
+
+def _collect_pairs_for_file(
+    fp: Path,
+    read_length: int,
+    insert_size: int,
+    insert_size_sd: float,
+    n_pairs_limit: int | None,
+    prefix: str,
+    *,
+    seed: int | None = None,
+    allow_ambiguous: bool = True,
+    substitution_rate: float = 0.0,
+    indel_rate: float = 0.0,
+    error_model: str | None = None,
+    mutation_rng: random.Random | None = None,
+    embed_taxonomy: bool = False,
+    viral_taxonomy: dict[str, str] | None = None,
+    category_override: str | None = None,
+) -> list[tuple[SeqRecord, SeqRecord]]:
+    """Return a list of (R1, R2) tuples for a single FASTA file.
+
+    Per-file cap ``n_pairs_limit`` counts **pairs** (not individual reads), so
+    coverage/abundance/reads-per-organism semantics stay consistent with the
+    single-end case: 5 reads/organism = 5 pairs = 10 physical records
+    written. Error models, mutations, embed-taxonomy, and ambiguous-base
+    filtering are applied to each read independently; if either read fails
+    ambiguity checking, the whole pair is dropped (paired-end concordance).
+    """
+    cat = category_override or _category_from_path(fp)
+    rng = random.Random(seed) if seed is not None else None
+    apply_platform = bool(error_model) and mutation_rng is not None
+    apply_mutations = (
+        not apply_platform and (substitution_rate > 0 or indel_rate > 0) and mutation_rng is not None
+    )
+    pairs: list[tuple[SeqRecord, SeqRecord]] = []
+    for rec_idx, record in enumerate(SeqIO.parse(fp, "fasta")):
+        if n_pairs_limit is not None and len(pairs) >= n_pairs_limit:
+            break
+        remaining = None if n_pairs_limit is None else n_pairs_limit - len(pairs)
+        record_prefix = prefix if rec_idx == 0 else f"{prefix}_seg{rec_idx}"
+        for r1, r2 in chunk_sequence_paired(
+            record,
+            record_prefix,
+            read_length,
+            insert_size,
+            insert_size_sd,
+            remaining,
+            rng=rng,
+        ):
+            r1.id = f"{cat}_{r1.id}"
+            r2.id = f"{cat}_{r2.id}"
+            if not _is_allowed_sequence(r1, allow_ambiguous) or not _is_allowed_sequence(r2, allow_ambiguous):
+                continue
+            if apply_platform:
+                r1 = _apply_error_model_to_record(r1, error_model, mutation_rng)
+                r2 = _apply_error_model_to_record(r2, error_model, mutation_rng)
+            elif apply_mutations:
+                r1 = _apply_mutations_to_record(r1, substitution_rate, indel_rate, mutation_rng)
+                r2 = _apply_mutations_to_record(r2, substitution_rate, indel_rate, mutation_rng)
+            if embed_taxonomy:
+                r1 = _embed_tax_in_description(r1, cat, prefix, viral_taxonomy)
+                r2 = _embed_tax_in_description(r2, cat, prefix, viral_taxonomy)
+            pairs.append((r1, r2))
+            if n_pairs_limit is not None and len(pairs) >= n_pairs_limit:
+                break
+    return pairs
+
+
+def _introduce_chimeras_paired(
+    pairs: list[tuple[SeqRecord, SeqRecord]],
+    chimera_rate: float,
+    rng: random.Random,
+) -> tuple[list[tuple[SeqRecord, SeqRecord]], int]:
+    """Paired-end analogue of :func:`_introduce_chimeras`.
+
+    Both mates of a chimeric pair come from the same two parent pairs so the
+    pair stays physically coherent (R1 is a chimera of the two parents' R1s,
+    R2 of their R2s). This matches what a wet-lab PCR chimera would look like
+    when sequenced paired-end (both reads from the same hybrid fragment).
+    """
+    if chimera_rate <= 0 or len(pairs) < 2:
+        return pairs, 0
+    chimera_rate = min(1.0, chimera_rate)
+    n = len(pairs)
+    n_chimeras = int(round(n * chimera_rate))
+    if n_chimeras == 0:
+        return pairs, 0
+    indices = list(range(n))
+    rng.shuffle(indices)
+    to_replace = set(indices[:n_chimeras])
+    out = list(pairs)
+    for idx in to_replace:
+        a_r1, a_r2 = pairs[idx]
+        candidates = [i for i in range(n) if i != idx]
+        b_idx = rng.choice(candidates)
+        b_r1, b_r2 = pairs[b_idx]
+        def _splice(left: SeqRecord, right: SeqRecord, mate_tag: str) -> SeqRecord:
+            sl = str(left.seq)
+            sr = str(right.seq)
+            cut_l = len(sl) // 2
+            cut_r = len(sr) // 2
+            new_seq = sl[:cut_l] + sr[cut_r:]
+            rec = SeqRecord(
+                Seq(new_seq),
+                id=f"chimera_{idx}_pair/{mate_tag}",
+                description=f"chimera parents={left.id}|{right.id} mate={mate_tag}",
+            )
+            ql = left.letter_annotations.get("phred_quality")
+            qr = right.letter_annotations.get("phred_quality")
+            if ql is not None and qr is not None:
+                rec.letter_annotations["phred_quality"] = list(ql[:cut_l]) + list(qr[cut_r:])
+            return rec
+
+        new_r1 = _splice(a_r1, b_r1, "1")
+        new_r2 = _splice(a_r2, b_r2, "2")
+        out[idx] = (new_r1, new_r2)
+    return out, n_chimeras
+
+
+def _introduce_pcr_duplicates_paired(
+    pairs: list[tuple[SeqRecord, SeqRecord]],
+    duplicate_rate: float,
+    rng: random.Random,
+) -> tuple[list[tuple[SeqRecord, SeqRecord]], int]:
+    """Paired-end analogue of :func:`_introduce_pcr_duplicates`.
+
+    Each pair is duplicated as a unit (both mates) with probability
+    ``duplicate_rate`` — real PCR duplicates in paired-end libraries always
+    clone both mates together.
+    """
+    if duplicate_rate <= 0 or not pairs:
+        return pairs, 0
+    duplicate_rate = min(1.0, duplicate_rate)
+    out = list(pairs)
+    dup_counter = 0
+    for r1, r2 in pairs:
+        if rng.random() < duplicate_rate:
+            dup_counter += 1
+            def _clone(rec: SeqRecord) -> SeqRecord:
+                clone = SeqRecord(
+                    Seq(str(rec.seq)),
+                    id=f"{rec.id}_dup",
+                    description=(
+                        f"{rec.description} pcr_duplicate=true"
+                        if rec.description
+                        else "pcr_duplicate=true"
+                    ),
+                )
+                q = rec.letter_annotations.get("phred_quality")
+                if q is not None:
+                    clone.letter_annotations["phred_quality"] = list(q)
+                return clone
+            out.append((_clone(r1), _clone(r2)))
+    return out, dup_counter
+
+
+def build_metagenome_paired(
+    input_path: Path,
+    out_path: Path,
+    read_length: int,
+    reads_per_organism: int | None,
+    *,
+    insert_size: int,
+    insert_size_sd: float,
+    seed: int | None = None,
+    allow_ambiguous: bool = True,
+    substitution_rate: float = 0.0,
+    indel_rate: float = 0.0,
+    abundance_profile: dict[str, float] | None = None,
+    abundance_distribution: str | None = None,
+    viral_taxonomy_json: Path | None = None,
+    balance_viral_by_taxonomy: bool = False,
+    error_model: str | None = None,
+    output_fastq: bool = False,
+    write_abundance: bool = False,
+    embed_taxonomy: bool = False,
+    chimera_rate: float = 0.0,
+    pcr_duplicate_rate: float = 0.0,
+    coverage: float | None = None,
+    coverage_cv: float = 0.0,
+    extra_viral_fasta: Path | None = None,
+    cap_total_reads: int | None = None,
+) -> tuple[int, Path, Path]:
+    """Paired-end metagenome generator. Writes ``{stem}_R1.*`` and ``{stem}_R2.*``.
+
+    Intentionally supports a focused subset of :func:`build_metagenome`
+    options (coverage, abundance, error models, taxonomy balancing/embedding,
+    chimeras, PCR duplicates, extra viral FASTA, write-abundance). EVE
+    filtering, similarity filtering, train/test split, multi-length and
+    variable-length modes are **not** supported in paired mode and must be
+    rejected by the caller. Returns ``(n_pairs, r1_path, r2_path)``; the
+    total physical records written is ``2 * n_pairs``.
+
+    ``reads_per_organism`` caps **pairs** per file (so N pairs = 2N records).
+    ``cap_total_reads`` caps the **total pair count** after building (again
+    so 2 * cap_total_reads records get written).
+    """
+    if read_length <= 0:
+        raise ValueError("read_length must be > 0")
+    if insert_size < read_length:
+        raise ValueError("insert_size must be >= read_length")
+    if insert_size_sd < 0:
+        raise ValueError("insert_size_sd must be >= 0")
+    if extra_viral_fasta is not None and not extra_viral_fasta.is_file():
+        raise FileNotFoundError(f"extra_viral_fasta not found or not a file: {extra_viral_fasta}")
+    if output_fastq and not error_model:
+        error_model = "illumina"
+    use_mutations = substitution_rate > 0 or indel_rate > 0 or bool(error_model)
+    if (use_mutations or output_fastq) and seed is None:
+        seed = 42
+
+    mutation_rng = random.Random(seed) if use_mutations else None
+
+    if input_path.is_file():
+        prefixes_and_files = [(input_path.stem, input_path)]
+    else:
+        prefixes_and_files = iter_genome_fastas(input_path)
+    num_files = len(prefixes_and_files)
+
+    # Per-file pair limit derivation — mirrors build_metagenome's logic but
+    # for paired mode the effective "read length" for coverage math is still
+    # ``read_length`` (not 2*read_length) because each pair consumes
+    # ``insert_size`` bases of genome, of which ``2*read_length`` land in
+    # records and the rest is the un-sequenced middle. Using ``read_length``
+    # produces the same reads-per-bp that a single-end run would at the same
+    # coverage, which is the user-intuitive definition.
+    if coverage is not None and coverage > 0:
+        read_limits = _compute_coverage_read_limits(
+            prefixes_and_files,
+            coverage,
+            max(1, read_length),
+            coverage_cv=coverage_cv,
+            abundance_profile=abundance_profile,
+            seed=seed,
+        )
+        if reads_per_organism is not None:
+            read_limits = [min(rl, reads_per_organism) for rl in read_limits]
+    elif reads_per_organism is None:
+        read_limits = [None] * num_files
+    else:
+        read_limits = _compute_read_limits(
+            prefixes_and_files,
+            reads_per_organism,
+            abundance_profile=abundance_profile,
+            abundance_distribution=abundance_distribution,
+            seed=seed,
+        )
+
+    viral_tax: dict[str, str] | None = None
+    if viral_taxonomy_json and viral_taxonomy_json.is_file() and (balance_viral_by_taxonomy or embed_taxonomy):
+        from .viral_taxonomy import load_viral_taxonomy
+        viral_tax = load_viral_taxonomy(viral_taxonomy_json) or None
+
+    if viral_tax and balance_viral_by_taxonomy:
+        stats = get_file_stats(input_path, read_length)
+        prefix_to_max_reads = {p: max_r for p, _fp, _tb, max_r in stats} if stats else {}
+        read_limits = _apply_viral_taxonomy_balance(
+            prefixes_and_files,
+            read_limits,
+            viral_tax,
+            prefix_to_max_reads=prefix_to_max_reads,
+        )
+        logger.info("Viral taxonomy balance (paired): applied for %d viral prefixes", len(viral_tax))
+
+    all_pairs: list[tuple[SeqRecord, SeqRecord]] = []
+    for i, (prefix, fp) in enumerate(prefixes_and_files):
+        file_seed = (seed + i) if seed is not None else None
+        file_mutation_rng = random.Random(seed + 10000 + i) if mutation_rng is not None else None
+        pairs = _collect_pairs_for_file(
+            fp,
+            read_length,
+            insert_size,
+            insert_size_sd,
+            read_limits[i],
+            prefix,
+            seed=file_seed,
+            allow_ambiguous=allow_ambiguous,
+            substitution_rate=substitution_rate,
+            indel_rate=indel_rate,
+            error_model=error_model,
+            mutation_rng=file_mutation_rng,
+            embed_taxonomy=embed_taxonomy,
+            viral_taxonomy=viral_tax,
+        )
+        all_pairs.extend(pairs)
+
+    if extra_viral_fasta is not None:
+        extra_seed = seed if seed is not None else 42
+        extra_pairs = _collect_pairs_for_file(
+            extra_viral_fasta,
+            read_length,
+            insert_size,
+            insert_size_sd,
+            reads_per_organism,
+            "extra_viral",
+            seed=extra_seed,
+            allow_ambiguous=allow_ambiguous,
+            substitution_rate=substitution_rate,
+            indel_rate=indel_rate,
+            error_model=error_model,
+            mutation_rng=random.Random(extra_seed + 10000) if mutation_rng is not None else None,
+            embed_taxonomy=embed_taxonomy,
+            viral_taxonomy=viral_tax,
+            category_override="virus",
+        )
+        all_pairs.extend(extra_pairs)
+        logger.info("Extra viral FASTA (paired): added %d pairs from %s", len(extra_pairs), extra_viral_fasta)
+
+    if cap_total_reads is not None and len(all_pairs) > cap_total_reads:
+        rng = random.Random(seed)
+        all_pairs = rng.sample(all_pairs, cap_total_reads)
+
+    if chimera_rate > 0 or pcr_duplicate_rate > 0:
+        artefact_seed = (seed + 40000) if seed is not None else None
+        artefact_rng = random.Random(artefact_seed) if artefact_seed is not None else random.Random()
+        if chimera_rate > 0:
+            all_pairs, n_chim = _introduce_chimeras_paired(all_pairs, chimera_rate, artefact_rng)
+            logger.info("Chimera injection (paired): replaced %d / %d pairs (rate=%.3f)", n_chim, len(all_pairs), chimera_rate)
+        if pcr_duplicate_rate > 0:
+            before = len(all_pairs)
+            all_pairs, n_dup = _introduce_pcr_duplicates_paired(all_pairs, pcr_duplicate_rate, artefact_rng)
+            logger.info(
+                "PCR duplicates (paired): added %d duplicate pairs (rate=%.3f, base=%d -> %d)",
+                n_dup, pcr_duplicate_rate, before, len(all_pairs),
+            )
+
+    r1_records = [p[0] for p in all_pairs]
+    r2_records = [p[1] for p in all_pairs]
+
+    stem = out_path.stem
+    ext = ".fastq" if output_fastq else (out_path.suffix if out_path.suffix else ".fasta")
+    r1_path = out_path.with_name(f"{stem}_R1{ext}")
+    r2_path = out_path.with_name(f"{stem}_R2{ext}")
+
+    if output_fastq:
+        for rec in r1_records:
+            add_illumina_qualities_to_record(rec, error_model=error_model)
+        for rec in r2_records:
+            add_illumina_qualities_to_record(rec, error_model=error_model)
+        write_format = "fastq"
+    else:
+        write_format = "fasta"
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    SeqIO.write(r1_records, r1_path, write_format)
+    SeqIO.write(r2_records, r2_path, write_format)
+
+    if write_abundance:
+        # Group by genome prefix (strip category + /1 | /2 + _dup, walk back
+        # through _pair_N so we reconstruct the file-level prefix).
+        from collections import Counter
+
+        def _prefix_of(rec: SeqRecord) -> str:
+            rid = rec.id
+            if rid.startswith("chimera_"):
+                return "chimera"
+            # Strip mate suffix
+            if "/" in rid:
+                rid = rid.rsplit("/", 1)[0]
+            if rid.endswith("_dup"):
+                rid = rid[: -len("_dup")]
+            if "_pair_" in rid:
+                rid = rid.rsplit("_pair_", 1)[0]
+            for cat in ("bacteria", "virus", "archaea", "plasmid"):
+                marker = f"{cat}_"
+                if rid.startswith(marker):
+                    return rid[len(marker):]
+            return rid
+
+        counts: Counter[str] = Counter()
+        # One pair contributes 1 to the genome's count (so values match the
+        # single-end ``write_abundance`` semantics of "n reads" where a read
+        # is a physical fragment, not a physical record).
+        for rec in r1_records:
+            counts[_prefix_of(rec)] += 1
+        total = sum(counts.values()) or 1
+        abundance_path = out_path.with_name(f"{stem}_abundance.txt")
+        with open(abundance_path, "w") as f:
+            f.write("genome_id\tread_count\tproportion\n")
+            for p in sorted(counts):
+                n = counts[p]
+                f.write(f"{p}\t{n}\t{n / total}\n")
+
+    return len(all_pairs), r1_path, r2_path
 
 
 def split_train_test_and_write(

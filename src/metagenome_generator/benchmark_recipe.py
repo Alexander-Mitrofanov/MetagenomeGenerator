@@ -99,7 +99,12 @@ def _sample_ids_with_optional_overlap(
 
 
 def _write_concat_fasta_and_lengths(accessions: list[str], cache_cat_dir: Path, out_fasta: Path) -> dict[str, int]:
-    """Concatenate cached per-accession FASTA files into a multi-FASTA and return qseqid->length."""
+    """Concatenate cached per-accession FASTA files into a multi-FASTA and return qseqid->length.
+
+    Supports multi-record FASTAs (e.g. multi-segment viruses such as influenza,
+    or draft genomes with multiple contigs). Every record contributes an entry
+    keyed by its record id (first whitespace-delimited token of the header).
+    """
     out_fasta.parent.mkdir(parents=True, exist_ok=True)
     qlens: dict[str, int] = {}
     # Write atomically-ish: if the file exists, overwrite it.
@@ -108,9 +113,13 @@ def _write_concat_fasta_and_lengths(accessions: list[str], cache_cat_dir: Path, 
             fp = cache_cat_dir / f"{acc}.fasta"
             if not fp.exists():
                 raise FileNotFoundError(f"Cached genome FASTA not found: {fp}")
-            rec = SeqIO.read(fp, "fasta")
-            qid = rec.id.split()[0]
-            qlens[qid] = len(rec.seq)
+            n_records = 0
+            for rec in SeqIO.parse(fp, "fasta"):
+                qid = rec.id.split()[0]
+                qlens[qid] = len(rec.seq)
+                n_records += 1
+            if n_records == 0:
+                raise ValueError(f"Cached genome FASTA has no records: {fp}")
             # Append raw FASTA for speed (stream, not read_text).
             with fp.open("r") as src:
                 shutil.copyfileobj(src, w)
@@ -318,8 +327,14 @@ def run_benchmark_recipe(
     3) Generate reads from the selected genomes and split them into train/test
        using the existing BLAST-based train-vs-test similarity filtering.
 
-    Returns the list of test FASTA/FASTQ paths (one per replicate).
-    progress_callback(replicate_index, total_replicates, message) is called for progress.
+    Returns the list of test-side output paths (one per replicate). The file
+    format depends on ``output_fastq``: ``False`` (default) writes FASTA
+    (``.fasta`` suffix, no per-base qualities); ``True`` writes FASTQ
+    (``.fastq`` suffix, per-base qualities from the sequencing-error model).
+    Both metagenome files and the downstream train/test split inherit the same
+    suffix, so the returned paths end in ``.fasta`` or ``.fastq`` accordingly.
+    ``progress_callback(replicate_index, total_replicates, message)`` is called
+    for progress.
     """
     train_test_split = normalize_train_split_percent(train_test_split)
     if per_category < 1:

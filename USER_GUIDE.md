@@ -85,7 +85,7 @@ metagenome-generator --help
 
 ## 3.2 Required tools
 
-- Python 3.10+
+- Python 3.8+ (matches `pyproject.toml`)
 - BLAST+ tools:
   - `makeblastdb`
   - `blastn`
@@ -97,8 +97,8 @@ No additional optional tool is required for the current CHIMERA pipeline workflo
 If you download from NCBI, set:
 
 ```bash
-export NCBI_EMAIL="you@example.com"
-export NCBI_API_KEY="..."
+export ENTREZ_EMAIL="you@example.com"
+export ENTREZ_API_KEY="..."
 ```
 
 This improves rate behavior and reliability.
@@ -277,6 +277,96 @@ metagenome-generator chunk \
 ```
 
 This modular approach is best for repeated experimentation.
+
+---
+
+## 6B-extras) Realistic sequencing options (A1 feature push)
+
+Both `chunk` and `pipeline` now expose five orthogonal knobs that make
+the generated reads more representative of a real sequencing run. They
+are all opt-in and can be mixed freely (subject to the incompatibilities
+noted below).
+
+### Sequencing platform error model — `--error-model`
+
+| Model          | Profile                                                                                         | Typical use                                  |
+|----------------|-------------------------------------------------------------------------------------------------|----------------------------------------------|
+| `illumina`     | Position-dependent substitution, low at 5′, higher at 3′. FASTQ uses the standard Illumina curve. | Short-read benchmarks.                       |
+| `nanopore`     | ~5.5 % total error (sub + ins + del); error rate inflated ×2.5 inside homopolymer runs ≥3 bp. FASTQ Phred ≈ Q13. | Long-read ONT benchmarks, homopolymer stress tests. |
+| `pacbio-hifi`  | ~0.3 % total error, substitution-biased. FASTQ Phred ≈ Q25.                                       | CCS-grade long-read benchmarks.              |
+| `pacbio-clr`   | ~12 % total error, indel-heavy. FASTQ Phred ≈ Q9.                                                 | Legacy PacBio CLR or noisy long-read tests.  |
+
+Combine with `--seed` for reproducibility.
+
+### Multi-length output — `--multi-length 300,500,1000,3000`
+
+Writes one FASTA/FASTQ per listed length (`{stem}_L300.fasta`,
+`{stem}_L500.fasta`, …) from the same genome set. Useful for
+DeepVirFinder-style matched-genome benchmarks across read lengths.
+Incompatible with variable-length contig flags and with
+`--train-test-split` (each length would need its own split).
+
+### Paired-end reads — `--paired` / `--insert-size` / `--insert-size-sd`
+
+Writes `{stem}_R1{suffix}` and `{stem}_R2{suffix}` with Illumina-style
+`/1` `/2` mate tags; R2 is the reverse complement of the 3′ end of each
+fragment. Fragment length is drawn from a truncated normal; defaults are
+`--insert-size = 3 × --sequence-length` and
+`--insert-size-sd = 0.1 × --insert-size`. Incompatible with
+`--multi-length`, `--train-test-split`, `--filter-similar`,
+`--eve-intervals` / `--run-blastn-filter`, and variable-length options.
+
+### Coverage-depth model — `--coverage` / `--coverage-cv`
+
+`--coverage X` derives per-genome read counts from a target depth
+(`reads ≈ bp × coverage / read_length`); `--reads-per-organism` still
+acts as a hard cap. `--coverage-cv Y` (with `--seed`) draws per-genome
+coverage from a log-normal with coefficient of variation `Y`, so
+different organisms receive different depths, matching real metagenomic
+sequencing.
+
+### Library-prep artefacts — `--chimera-rate` / `--pcr-duplicate-rate`
+
+Injected after similarity filtering / capping but before quality
+annotation:
+
+- `--chimera-rate 0.02` replaces 2 % of records with two-parent chimeras
+  (5′ half of parent A + 3′ half of parent B; id `chimera_{idx}`,
+  header `chimera parents=A|B`; length preserved). Phred qualities are
+  spliced from the two parents so FASTQ stays valid.
+- `--pcr-duplicate-rate 0.1` appends bit-identical duplicates (~10 %)
+  with id suffix `_dup` and header tag `pcr_duplicate=true`.
+
+Both require `--seed` for reproducibility.
+
+### Gold-standard taxonomy labels — `--embed-taxonomy`
+
+Appends `tax=<group>` to every record's description. Viral reads look up
+their group in `--viral-taxonomy <JSON>` (`unknown` fallback); non-viral
+reads get the category name (`bacteria`, `archaea`, `plasmid`). Useful
+when downstream supervised training reads labels directly from the
+FASTA/FASTQ header.
+
+### Worked example: paired-end ONT-style run with uneven coverage and duplicates
+
+```bash
+metagenome-generator chunk \
+  --input output/downloaded \
+  --output metagenome.fastq \
+  --output-dir output/metagenome \
+  --sequence-length 500 \
+  --paired --insert-size 1500 --insert-size-sd 150 \
+  --error-model nanopore \
+  --coverage 5 --coverage-cv 0.5 \
+  --pcr-duplicate-rate 0.1 \
+  --embed-taxonomy --viral-taxonomy viral_taxonomy.json \
+  --output-fastq --seed 42
+```
+
+This produces `metagenome_R1.fastq` and `metagenome_R2.fastq`, with
+nanopore-like indels, ~5× mean coverage drawn log-normally per genome,
+10 % PCR duplicates, and every read carrying its taxonomy group in its
+description.
 
 ---
 

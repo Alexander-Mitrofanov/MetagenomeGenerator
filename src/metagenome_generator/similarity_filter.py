@@ -22,10 +22,20 @@ logger = logging.getLogger(__name__)
 BLAST_SIM_COLS = "qseqid sseqid pident length"
 
 
-def _build_blast_db(fasta_path: Path, db_dir: Path) -> Path:
-    """Run makeblastdb on fasta_path. Returns path to DB prefix (no extension)."""
+def _build_blast_db(fasta_path: Path, db_dir: Path, *, prefix: str | None = None) -> Path:
+    """Run makeblastdb on fasta_path. Returns path to DB prefix (no extension).
+
+    The output prefix defaults to ``<fasta stem>_db`` inside ``db_dir`` so that
+    rebuilding the DB from the same FASTA intentionally overwrites it (the
+    within-call ``filter_by_similarity`` flow relies on this), while DBs built
+    from different FASTAs in the same ``db_dir`` (e.g. first-batch self-BLAST
+    vs. the growing kept-set DB, or concurrent callers sharing ``work_dir``)
+    get distinct prefixes and no longer clobber each other. Pass ``prefix`` to
+    override (e.g. for tests or bespoke pipelines).
+    """
     db_dir.mkdir(parents=True, exist_ok=True)
-    db_prefix = db_dir / "simfilter_db"
+    base = prefix if prefix is not None else f"{fasta_path.stem}_db"
+    db_prefix = db_dir / base
     subprocess.run(
         [
             "makeblastdb",
@@ -101,6 +111,43 @@ def _parse_similar_hits(
     return similar_ids
 
 
+def _parse_similar_neighbors(
+    tsv_path: Path,
+    query_lengths: dict[str, int],
+    pident_threshold: float,
+    min_coverage: float,
+) -> dict[str, set[str]]:
+    """Parse all-vs-all BLAST output into a symmetric adjacency dict.
+
+    Used for within-batch deduplication when seeding the kept set: any pair (q, s)
+    with pident >= threshold and alignment length >= min_coverage * qlen is
+    considered a near-duplicate. Self-hits (q == s) are ignored.
+    """
+    neighbors: dict[str, set[str]] = {qid: set() for qid in query_lengths}
+    if not tsv_path.exists():
+        return neighbors
+    with tsv_path.open() as f:
+        for line in f:
+            parts = line.strip().split("\t")
+            if len(parts) < 4:
+                continue
+            qseqid, sseqid, pident_str, length_str = parts[0], parts[1], parts[2], parts[3]
+            if qseqid == sseqid:
+                continue
+            try:
+                pident = float(pident_str)
+                length = int(length_str)
+            except (ValueError, TypeError):
+                continue
+            qlen = query_lengths.get(qseqid)
+            if qlen is None or qlen == 0:
+                continue
+            if pident >= pident_threshold and length >= min_coverage * qlen:
+                neighbors.setdefault(qseqid, set()).add(sseqid)
+                neighbors.setdefault(sseqid, set()).add(qseqid)
+    return neighbors
+
+
 def filter_by_similarity(
     records: list[SeqRecord],
     target_count: int,
@@ -110,15 +157,26 @@ def filter_by_similarity(
     oversample_factor: float = 2.0,
     batch_size: int = 500,
     work_dir: Path | None = None,
-    max_refill_rounds: int = 3,
+    max_refill_rounds: int | None = None,
     num_threads: int = 4,
     use_megablast: bool = True,
 ) -> tuple[list[SeqRecord], dict]:
     """Filter records so no two kept sequences are >= similarity_threshold similar (BLASTN pident over min_coverage of query).
 
-    Processes in order: keep a sequence only if it is not similar to any already kept.
-    Returns (filtered list of up to target_count records, stats dict with keys like 'generated', 'removed', 'kept', 'warning').
+    Single-pass over ``records``: the first batch is deduplicated against itself,
+    then each subsequent batch is BLAST'd against the growing ``kept`` set and
+    only non-similar sequences are retained. Returns
+    ``(filtered list of up to target_count records, stats dict)`` with keys
+    ``generated``, ``removed``, ``kept``, ``rounds``, ``warning``.
+
+    ``max_refill_rounds`` is accepted for backward compatibility only — the
+    previous outer loop was dead code (candidates were cleared after the first
+    round), so it never triggered. Refill is the caller's responsibility:
+    generate more candidates and call :func:`filter_candidates_against_kept`.
+    ``oversample_factor`` is likewise a caller-side hint and is not used here.
     """
+    _ = max_refill_rounds, oversample_factor  # intentionally unused (see docstring)
+
     stats = {"generated": len(records), "removed": 0, "kept": 0, "rounds": 1, "warning": None}
     if not records:
         return [], stats
@@ -127,85 +185,97 @@ def filter_by_similarity(
 
     kept: list[SeqRecord] = []
     candidates = list(records)
-    round_num = 0
-    while len(kept) < target_count and (candidates or round_num == 0):
-        round_num += 1
-        if round_num > max_refill_rounds:
-            logger.warning(
-                "Similarity filter: max refill rounds (%d) reached; kept %d < target %d",
-                max_refill_rounds, len(kept), target_count,
-            )
-            stats["warning"] = f"Dataset could not be fully created: kept {len(kept)} < target {target_count} after {max_refill_rounds} rounds (similarity threshold {similarity_threshold}%)."
+
+    use_dir = work_dir or Path(tempfile.mkdtemp(prefix="simfilter_"))
+    use_dir.mkdir(parents=True, exist_ok=True)
+    kept_fasta = use_dir / "kept.fasta"
+    db_dir = use_dir / "db"
+    db_dir.mkdir(parents=True, exist_ok=True)
+
+    db_prefix: str | None = None
+    removed_count = 0
+    i = 0
+    while i < len(candidates) and len(kept) < target_count:
+        batch = candidates[i : i + batch_size]
+        i += batch_size
+        if not batch:
             break
-        if not candidates:
-            logger.warning(
-                "Similarity filter: no more candidates; kept %d < target %d",
-                len(kept), target_count,
-            )
-            stats["warning"] = f"Dataset could not be fully created: kept {len(kept)} < target {target_count} (not enough unique sequences after filtering)."
-            break
+        query_lengths = {rec.id: len(rec.seq) for rec in batch}
+        batch_fasta = use_dir / "batch.fasta"
+        SeqIO.write(batch, batch_fasta, "fasta")
 
-        use_dir = work_dir or Path(tempfile.mkdtemp(prefix="simfilter_"))
-        use_dir.mkdir(parents=True, exist_ok=True)
-        kept_fasta = use_dir / "kept.fasta"
-        db_dir = use_dir / "db"
-        db_dir.mkdir(parents=True, exist_ok=True)
-
-        if kept:
-            SeqIO.write(kept, kept_fasta, "fasta")
-            db_prefix = _build_blast_db(kept_fasta, db_dir)
-        else:
-            db_prefix = None
-
-        removed_this_round = 0
-        i = 0
-        while i < len(candidates) and len(kept) < target_count:
-            batch = candidates[i : i + batch_size]
-            i += batch_size
-            if not batch:
-                break
-            query_lengths = {rec.id: len(rec.seq) for rec in batch}
-            batch_fasta = use_dir / "batch.fasta"
-            SeqIO.write(batch, batch_fasta, "fasta")
-
-            if db_prefix is None:
-                # First batch: all go to kept, then build DB
-                kept.extend(batch)
-                stats["kept"] = len(kept)
-                kept_fasta = use_dir / "kept.fasta"
-                SeqIO.write(kept, kept_fasta, "fasta")
-                db_prefix = _build_blast_db(kept_fasta, db_dir)
-                continue
-
-            out_tsv = use_dir / "batch_vs_kept.tsv"
+        if db_prefix is None:
+            # First batch: dedup within the batch before seeding `kept`. Previously
+            # the entire first batch was appended unchecked, which allowed pairs of
+            # near-duplicates from the same batch to both remain in the output
+            # and violate the "no two kept sequences >= threshold similar" contract.
+            db_prefix = _build_blast_db(batch_fasta, db_dir)
+            self_tsv = use_dir / "batch_self.tsv"
+            # For pairwise dedup we need every significant neighbor, not just the top
+            # 5 (default). Cap at 500 to bound memory for very large first batches.
+            self_max_targets = max(5, min(len(batch), 500))
             _run_blastn_similarity(
                 batch_fasta,
                 db_prefix,
-                out_tsv,
+                self_tsv,
                 perc_identity=similarity_threshold,
-                max_target_seqs=5,
+                max_target_seqs=self_max_targets,
                 num_threads=num_threads,
                 use_megablast=use_megablast,
             )
-            similar_ids = _parse_similar_hits(
-                out_tsv, query_lengths, similarity_threshold, min_coverage
+            neighbors = _parse_similar_neighbors(
+                self_tsv, query_lengths, similarity_threshold, min_coverage
             )
+            kept_ids: set[str] = set()
             for rec in batch:
-                if rec.id in similar_ids:
-                    removed_this_round += 1
+                if any(nid in kept_ids for nid in neighbors.get(rec.id, ())):
+                    removed_count += 1
                     continue
                 if len(kept) >= target_count:
                     break
                 kept.append(rec)
-            # Rebuild kept FASTA and DB once per batch for next batch
+                kept_ids.add(rec.id)
+            # Rebuild DB from the deduplicated kept set for subsequent batches.
             if kept:
                 SeqIO.write(kept, kept_fasta, "fasta")
                 db_prefix = _build_blast_db(kept_fasta, db_dir)
+            continue
 
-        stats["removed"] += removed_this_round
-        stats["kept"] = len(kept)
-        stats["rounds"] = round_num
-        candidates = []  # No refill in this implementation from extra generation; caller can pass more records
+        out_tsv = use_dir / "batch_vs_kept.tsv"
+        _run_blastn_similarity(
+            batch_fasta,
+            db_prefix,
+            out_tsv,
+            perc_identity=similarity_threshold,
+            max_target_seqs=5,
+            num_threads=num_threads,
+            use_megablast=use_megablast,
+        )
+        similar_ids = _parse_similar_hits(
+            out_tsv, query_lengths, similarity_threshold, min_coverage
+        )
+        for rec in batch:
+            if rec.id in similar_ids:
+                removed_count += 1
+                continue
+            if len(kept) >= target_count:
+                break
+            kept.append(rec)
+        if kept:
+            SeqIO.write(kept, kept_fasta, "fasta")
+            db_prefix = _build_blast_db(kept_fasta, db_dir)
+
+    stats["removed"] = removed_count
+    stats["kept"] = len(kept)
+    if len(kept) < target_count:
+        logger.warning(
+            "Similarity filter: kept %d < target %d after single pass; caller may refill via filter_candidates_against_kept",
+            len(kept), target_count,
+        )
+        stats["warning"] = (
+            f"Dataset could not be fully created: kept {len(kept)} < target {target_count} "
+            f"(not enough unique sequences after filtering at {similarity_threshold}% identity)."
+        )
 
     result = kept[:target_count] if len(kept) >= target_count else kept
     stats["kept"] = len(result)
@@ -258,6 +328,18 @@ def filter_candidates_against_kept(
     return passing
 
 
+_FASTQ_SUFFIXES = {".fastq", ".fq"}
+
+
+def _format_from_suffix(path: Path) -> str:
+    """Return 'fastq' if the file extension is .fastq/.fq, else 'fasta'.
+
+    Matches the detection used elsewhere in the CLI (see
+    split-metagenome-train-test) so FASTQ inputs are not silently mis-parsed.
+    """
+    return "fastq" if path.suffix.lower() in _FASTQ_SUFFIXES else "fasta"
+
+
 def filter_test_against_train(
     train_fasta: Path,
     test_fasta: Path,
@@ -269,18 +351,31 @@ def filter_test_against_train(
     batch_size: int = 2000,
     num_threads: int = 4,
 ) -> tuple[int, int]:
-    """Load train and test FASTAs; remove from test any read >= similarity_threshold similar to train; write filtered test.
+    """Load train and test metagenomes; remove from test any read >= similarity_threshold similar to train; write filtered test.
+
+    Input formats are inferred from file extensions: ``.fastq``/``.fq`` are read
+    as FASTQ (Phred qualities preserved), anything else as FASTA. The output is
+    written in the test input's format so per-base qualities survive the round
+    trip. Previously both inputs were always parsed as FASTA, which silently
+    produced empty results when FASTQ files were passed.
 
     Returns (n_removed, n_kept). Use for temporal split: after building train and test metagenomes separately,
     run this to drop test reads that are highly similar to train (e.g. different strains of same species).
     Requires BLAST+.
     """
-    train_records = list(SeqIO.parse(train_fasta, "fasta"))
-    test_records = list(SeqIO.parse(test_fasta, "fasta"))
+    train_fmt = _format_from_suffix(train_fasta)
+    test_fmt = _format_from_suffix(test_fasta)
+    out_fmt = test_fmt  # Preserve Phred qualities when test input is FASTQ.
+
+    train_records = list(SeqIO.parse(train_fasta, train_fmt))
+    test_records = list(SeqIO.parse(test_fasta, test_fmt))
+    output_fasta.parent.mkdir(parents=True, exist_ok=True)
+
     if not train_records:
-        SeqIO.write(test_records, output_fasta, "fasta")
+        SeqIO.write(test_records, output_fasta, out_fmt)
         return 0, len(test_records)
     if not test_records:
+        # Empty output; still write a well-formed empty file.
         output_fasta.write_text("")
         return 0, 0
     filtered = filter_candidates_against_kept(
@@ -294,6 +389,5 @@ def filter_test_against_train(
         use_megablast=True,
     )
     n_removed = len(test_records) - len(filtered)
-    output_fasta.parent.mkdir(parents=True, exist_ok=True)
-    SeqIO.write(filtered, output_fasta, "fasta")
+    SeqIO.write(filtered, output_fasta, out_fmt)
     return n_removed, len(filtered)

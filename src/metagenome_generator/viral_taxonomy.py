@@ -114,22 +114,34 @@ def _lineage_from_efetch(taxids: list[str], level: str) -> dict[str, str]:
     for taxon in root.iter():
         if local_tag(taxon.tag) != "Taxon":
             continue
-        taxid_el = taxon.find("TaxId") or taxon.find("{*}TaxId")
+        # ElementTree elements with no children are *falsy*, so the old
+        # ``a or b`` pattern silently preferred the namespaced find whenever the
+        # plain one matched a leaf element (TaxId/Rank/ScientificName). Use
+        # explicit ``is None`` chaining so we always take the first real match.
+        taxid_el = taxon.find("TaxId")
+        if taxid_el is None:
+            taxid_el = taxon.find("{*}TaxId")
         taxid = taxid_el.text if taxid_el is not None and taxid_el.text else None
         if not taxid:
             continue
         # Only process top-level Taxon (has LineageEx); skip nested Taxon inside LineageEx
-        if taxon.find("LineageEx") is None and taxon.find("{*}LineageEx") is None:
+        lineage = taxon.find("LineageEx")
+        if lineage is None:
+            lineage = taxon.find("{*}LineageEx")
+        if lineage is None:
             continue
         name = None
         fallback = None
-        lineage = taxon.find("LineageEx") or taxon.find("{*}LineageEx")
-        if lineage is None:
-            result[taxid] = "unknown"
-            continue
-        for lex in lineage.findall("Taxon") or lineage.findall("{*}Taxon") or []:
-            rank_el = lex.find("Rank") or lex.find("{*}Rank")
-            name_el = lex.find("ScientificName") or lex.find("{*}ScientificName")
+        lex_children = lineage.findall("Taxon")
+        if not lex_children:
+            lex_children = lineage.findall("{*}Taxon")
+        for lex in lex_children:
+            rank_el = lex.find("Rank")
+            if rank_el is None:
+                rank_el = lex.find("{*}Rank")
+            name_el = lex.find("ScientificName")
+            if name_el is None:
+                name_el = lex.find("{*}ScientificName")
             if rank_el is None or name_el is None or not rank_el.text or not name_el.text:
                 continue
             r = rank_el.text.lower()
@@ -142,6 +154,9 @@ def _lineage_from_efetch(taxids: list[str], level: str) -> dict[str, str]:
     return result
 
 
+UNKNOWN_TAXONOMY_WARN_FRACTION = 0.5
+
+
 def fetch_viral_taxonomy_groups(
     viral_accessions: list[str],
     level: str = "family",
@@ -152,6 +167,13 @@ def fetch_viral_taxonomy_groups(
     """Return list of taxonomy group names (family or realm) for each viral accession in order.
 
     Uses elink nuccore->taxonomy then efetch taxonomy. Missing/failed -> "unknown".
+
+    Emits a WARNING when a large fraction of accessions (>= 50%) resolve to
+    ``"unknown"``. This commonly indicates an accession-format mismatch
+    (e.g. versioned vs. unversioned IDs between the snapshot and the viral
+    taxonomy JSON) or an NCBI connectivity issue, and would otherwise silently
+    funnel every sequence into a single ``unknown`` bucket — defeating
+    ``--balance-viral-by-taxonomy``.
     """
     groups: list[str] = []
     total_batches = (len(viral_accessions) + batch_size - 1) // batch_size
@@ -177,6 +199,19 @@ def fetch_viral_taxonomy_groups(
             groups.append(taxid_to_group.get(tid, "unknown"))
         if progress_callback:
             progress_callback(batch_idx + 1, total_batches, len(groups))
+
+    total = len(groups)
+    if total > 0:
+        unknown_count = sum(1 for g in groups if g == "unknown")
+        unknown_frac = unknown_count / total
+        if unknown_frac >= UNKNOWN_TAXONOMY_WARN_FRACTION:
+            logger.warning(
+                "Viral taxonomy lookup returned 'unknown' for %d/%d accessions (%.1f%%) at level=%s. "
+                "This typically indicates an accession format mismatch (versioned vs. unversioned IDs, "
+                "or snapshot accessions not present in NCBI) or a transient NCBI failure. "
+                "Balancing by taxonomy will be ineffective if most accessions share the 'unknown' bucket.",
+                unknown_count, total, 100.0 * unknown_frac, level,
+            )
     return groups
 
 

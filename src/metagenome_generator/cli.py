@@ -11,9 +11,12 @@ from .download_genomes import download_genomes
 from .chunk_genomes import (
     CONTIG_QUALITY_PRESET_NAMES,
     build_metagenome,
+    build_metagenome_multi_length,
+    build_metagenome_paired,
     contig_quality_profile_mean_length,
     get_file_stats,
     normalize_train_split_percent,
+    parse_multi_length_spec,
     split_train_test_and_write,
 )
 from .blastn_filter import export_eve_regions_fasta, load_eve_intervals, run_blastn_from_dirs, run_build_viral_db
@@ -83,13 +86,13 @@ def _add_download_subparser(subparsers) -> None:
         "--num-bacteria",
         type=int,
         default=10,
-        help="Number of bacterial genomes to download. Default: 10",
+        help="Number of bacterial genomes to download via NCBI search. Ignored when --accessions-file is set (use --max-bacteria for the cap in that mode). Default: 10.",
     )
     p.add_argument(
         "--num-virus",
         type=int,
         default=10,
-        help="Number of viral genomes to download. Default: 10",
+        help="Number of viral genomes to download via NCBI search. Ignored when --accessions-file is set (use --max-virus). Default: 10.",
     )
     p.add_argument(
         "--output-dir",
@@ -101,20 +104,20 @@ def _add_download_subparser(subparsers) -> None:
         "--num-archaea",
         type=int,
         default=0,
-        help="Number of archaeal genomes (negative samples). Default: 0",
+        help="Number of archaeal genomes (negative samples) to download via NCBI search. Ignored when --accessions-file is set (use --max-archaea). Default: 0.",
     )
     p.add_argument(
         "--num-plasmid",
         type=int,
         default=0,
-        help="Number of plasmids (negative samples). Default: 0",
+        help="Number of plasmids (negative samples) to download via NCBI search. Ignored when --accessions-file is set (use --max-plasmid). Default: 0.",
     )
     p.add_argument(
         "--accessions-file",
         type=Path,
         default=None,
         metavar="PATH",
-        help="Load accession IDs from JSON (skip NCBI search) for reproducibility.",
+        help="Load accession IDs from a snapshot JSON (skip NCBI search) for reproducibility. When set, --num-* flags are IGNORED and the per-category accession count is controlled by --max-* (default: use every accession in the file).",
     )
     p.add_argument(
         "--save-accessions",
@@ -253,10 +256,50 @@ def _add_chunk_subparser(subparsers) -> None:
         help="Read length in nucleotides. Default: 250",
     )
     p.add_argument(
+        "--multi-length",
+        type=str,
+        default=None,
+        metavar="LENS",
+        help="Comma-separated list of fixed read lengths (e.g. '300,500,1000,3000') to emit in one run. Writes one file per length: '{stem}_L{N}.fasta' (or .fastq). Mutually exclusive with --min-contig-length/--max-contig-length/--contig-quality-profile and --train-test-split.",
+    )
+    p.add_argument(
+        "--paired",
+        action="store_true",
+        help="Emit paired-end reads. Writes two files: '{stem}_R1.fasta' and '{stem}_R2.fasta' (or .fastq). Requires fixed-length reads; not compatible with --multi-length, variable-length modes, --train-test-split, --filter-similar, or --eve-intervals.",
+    )
+    p.add_argument(
+        "--insert-size",
+        type=int,
+        default=None,
+        metavar="BP",
+        help="Mean fragment (insert) length in bp for paired-end. Default: 3 * --sequence-length. Must be >= read length.",
+    )
+    p.add_argument(
+        "--insert-size-sd",
+        type=float,
+        default=None,
+        metavar="BP",
+        help="Standard deviation of the insert-length distribution (Normal). Default: 10%% of --insert-size. 0 = fixed insert length.",
+    )
+    p.add_argument(
         "--reads-per-organism",
         type=int,
         default=None,
         help="Max reads to extract per organism (per input file). Default: all reads",
+    )
+    p.add_argument(
+        "--coverage",
+        type=float,
+        default=None,
+        metavar="X",
+        help="Target sequencing coverage (e.g. 5 = 5x): reads per genome = ceil(genome_bp * coverage / read_length). Overrides --reads-per-organism (but --reads-per-organism still acts as an upper cap if set). Pairs with --coverage-cv for uneven coverage across genomes.",
+    )
+    p.add_argument(
+        "--coverage-cv",
+        type=float,
+        default=0.0,
+        metavar="CV",
+        help="Coefficient of variation (>=0) for per-genome coverage drawn from a log-normal. 0 = uniform coverage, 0.5 = moderate heterogeneity, 1.0 = strong. Requires --coverage. Use --seed for reproducibility.",
     )
     p.add_argument(
         "--balanced",
@@ -358,12 +401,31 @@ def _add_chunk_subparser(subparsers) -> None:
         help="Balance viral reads by taxonomy group so each group contributes equally. Requires --viral-taxonomy.",
     )
     p.add_argument(
+        "--embed-taxonomy",
+        action="store_true",
+        help="Append 'tax=<group>' to each read's FASTA/FASTQ description. Viral reads use --viral-taxonomy (accession -> group); non-viral reads use their category label. Produces CAMISIM-style per-read ground-truth labels.",
+    )
+    p.add_argument(
+        "--chimera-rate",
+        type=float,
+        default=0.0,
+        metavar="R",
+        help="Fraction of output reads (0.0-1.0) replaced by two-parent chimeras (5' half of one read + 3' half of another). Use --seed for reproducibility. Default: 0",
+    )
+    p.add_argument(
+        "--pcr-duplicate-rate",
+        type=float,
+        default=0.0,
+        metavar="R",
+        help="Per-read PCR-duplicate probability (0.0-1.0). Each read independently produces one bit-identical duplicate with this probability. Default: 0",
+    )
+    p.add_argument(
         "--error-model",
         type=str,
         default=None,
-        choices=["illumina"],
+        choices=["illumina", "nanopore", "pacbio-hifi", "pacbio-clr"],
         metavar="MODEL",
-        help="Apply platform-specific sequencing errors (e.g. illumina: position-dependent substitution, higher toward 3'). Use --seed for reproducibility.",
+        help="Apply platform-specific sequencing errors: illumina (position-dependent substitution, higher toward 3'), nanopore (indel-heavy, homopolymer-prone, ~5%% error), pacbio-hifi (CCS-like, ~0.3%% error, substitution-biased), pacbio-clr (CLR, ~12%% error, indel-heavy). Use --seed for reproducibility.",
     )
     p.add_argument(
         "--output-fastq",
@@ -387,13 +449,13 @@ def _add_pipeline_subparser(subparsers) -> None:
         "--num-bacteria",
         type=int,
         default=10,
-        help="Number of bacterial genomes to download. Default: 10",
+        help="Number of bacterial genomes to download via NCBI search. Ignored when --accessions-file is set (use --max-bacteria). Default: 10.",
     )
     p.add_argument(
         "--num-virus",
         type=int,
         default=10,
-        help="Number of viral genomes to download. Default: 10",
+        help="Number of viral genomes to download via NCBI search. Ignored when --accessions-file is set (use --max-virus). Default: 10.",
     )
     p.add_argument(
         "--output-dir",
@@ -421,10 +483,50 @@ def _add_pipeline_subparser(subparsers) -> None:
         help="Read length in nucleotides. Default: 250",
     )
     p.add_argument(
+        "--multi-length",
+        type=str,
+        default=None,
+        metavar="LENS",
+        help="Comma-separated list of fixed read lengths (e.g. '300,500,1000,3000'). Writes one file per length: '{stem}_L{N}.fasta'. Mutually exclusive with variable-length modes and --train-test-split.",
+    )
+    p.add_argument(
+        "--paired",
+        action="store_true",
+        help="Emit paired-end reads ({stem}_R1.fasta and {stem}_R2.fasta; or .fastq). Fixed-length only; incompatible with --multi-length, --train-test-split, --filter-similar, --run-blastn-filter.",
+    )
+    p.add_argument(
+        "--insert-size",
+        type=int,
+        default=None,
+        metavar="BP",
+        help="Mean fragment length in bp for paired-end. Default: 3 * --sequence-length.",
+    )
+    p.add_argument(
+        "--insert-size-sd",
+        type=float,
+        default=None,
+        metavar="BP",
+        help="Standard deviation of the insert-length distribution. Default: 10%% of --insert-size.",
+    )
+    p.add_argument(
         "--reads-per-organism",
         type=int,
         default=1000,
         help="Max reads to extract per organism (per input file). Default: 1000",
+    )
+    p.add_argument(
+        "--coverage",
+        type=float,
+        default=None,
+        metavar="X",
+        help="Target sequencing coverage (e.g. 5 = 5x). Overrides --reads-per-organism for the read-count calculation. Pair with --coverage-cv for uneven coverage.",
+    )
+    p.add_argument(
+        "--coverage-cv",
+        type=float,
+        default=0.0,
+        metavar="CV",
+        help="Coefficient of variation (>=0) for per-genome coverage (log-normal). Requires --coverage. Use --seed for reproducibility.",
     )
     p.add_argument(
         "--balanced",
@@ -435,13 +537,13 @@ def _add_pipeline_subparser(subparsers) -> None:
         "--num-archaea",
         type=int,
         default=0,
-        help="Number of archaeal genomes to download. Default: 0",
+        help="Number of archaeal genomes to download via NCBI search. Ignored when --accessions-file is set (use --max-archaea). Default: 0.",
     )
     p.add_argument(
         "--num-plasmid",
         type=int,
         default=0,
-        help="Number of plasmids to download. Default: 0",
+        help="Number of plasmids to download via NCBI search. Ignored when --accessions-file is set (use --max-plasmid). Default: 0.",
     )
     p.add_argument(
         "--min-contig-length",
@@ -623,7 +725,7 @@ def _add_pipeline_subparser(subparsers) -> None:
         type=Path,
         default=None,
         metavar="PATH",
-        help="Load accession IDs from JSON for download step (reproducibility; skip NCBI search).",
+        help="Load accession IDs from a snapshot JSON for the download step (reproducibility; skip NCBI search). When set, --num-* flags are IGNORED and the per-category accession count is controlled by --max-* (default: use every accession in the file).",
     )
     p.add_argument(
         "--save-accessions",
@@ -725,12 +827,31 @@ def _add_pipeline_subparser(subparsers) -> None:
         help="Balance viral reads by taxonomy group (requires --viral-taxonomy).",
     )
     p.add_argument(
+        "--embed-taxonomy",
+        action="store_true",
+        help="Append 'tax=<group>' to each read's FASTA/FASTQ description (CAMISIM-style per-read ground truth). Viral reads use --viral-taxonomy (accession -> group); non-viral reads use their category label.",
+    )
+    p.add_argument(
+        "--chimera-rate",
+        type=float,
+        default=0.0,
+        metavar="R",
+        help="Fraction of output reads (0.0-1.0) replaced by two-parent chimeras (5' half of one read + 3' half of another). Use --seed for reproducibility. Default: 0",
+    )
+    p.add_argument(
+        "--pcr-duplicate-rate",
+        type=float,
+        default=0.0,
+        metavar="R",
+        help="Per-read PCR-duplicate probability (0.0-1.0). Each read independently produces one bit-identical duplicate with this probability. Default: 0",
+    )
+    p.add_argument(
         "--error-model",
         type=str,
         default=None,
-        choices=["illumina"],
+        choices=["illumina", "nanopore", "pacbio-hifi", "pacbio-clr"],
         metavar="MODEL",
-        help="Apply platform-specific sequencing errors when chunking (e.g. illumina: position-dependent substitution). Use --seed for reproducibility.",
+        help="Apply platform-specific sequencing errors: illumina (position-dependent substitution), nanopore (indel-heavy, homopolymer-prone), pacbio-hifi (low-error substitution-biased), pacbio-clr (high-error, indel-heavy). Use --seed for reproducibility.",
     )
     p.add_argument(
         "--output-fastq",
@@ -1095,7 +1216,12 @@ def _run_filter_test_against_train(args) -> None:
             raise SystemExit(f"File not found: {path}")
     output_path = args.output
     if output_path is None:
-        output_path = args.test_fasta.parent.parent / "test_metagenome_filtered.fasta"
+        # Match the test input's extension so FASTQ is written as FASTQ and
+        # FASTA as FASTA (see filter_test_against_train which infers format
+        # from the suffix).
+        test_suffix = args.test_fasta.suffix.lower()
+        out_suffix = test_suffix if test_suffix in (".fasta", ".fa", ".fastq", ".fq") else ".fasta"
+        output_path = args.test_fasta.parent.parent / f"test_metagenome_filtered{out_suffix}"
     n_removed, n_kept = filter_test_against_train(
         args.train_fasta,
         args.test_fasta,
@@ -1119,7 +1245,7 @@ def _add_split_metagenome_train_test_subparser(subparsers) -> None:
         type=Path,
         required=True,
         metavar="PATH",
-        help="Input metagenome file (FAST A/FASTQ).",
+        help="Input metagenome file (FASTA/FASTQ).",
     )
     p.add_argument(
         "--output-dir",
@@ -1882,6 +2008,17 @@ def _run_chunk(args) -> None:
     min_len = getattr(args, "min_contig_length", None)
     max_len = getattr(args, "max_contig_length", None)
     quality_profile = getattr(args, "contig_quality_profile", None)
+    multi_length_spec = getattr(args, "multi_length", None)
+    multi_lengths: list[int] | None = None
+    if multi_length_spec is not None:
+        try:
+            multi_lengths = parse_multi_length_spec(multi_length_spec)
+        except ValueError as exc:
+            raise SystemExit(f"--multi-length: {exc}") from exc
+        if quality_profile is not None or min_len is not None or max_len is not None:
+            raise SystemExit("--multi-length cannot be combined with --min-contig-length/--max-contig-length/--contig-quality-profile")
+        if getattr(args, "train_test_split", None) is not None:
+            raise SystemExit("--multi-length cannot be combined with --train-test-split (run splits per length separately).")
     if quality_profile is not None and (min_len is not None or max_len is not None):
         raise SystemExit("--contig-quality-profile cannot be combined with --min-contig-length/--max-contig-length")
     if min_len is not None and max_len is not None and min_len > max_len:
@@ -1940,11 +2077,30 @@ def _run_chunk(args) -> None:
     balance_viral = getattr(args, "balance_viral_by_taxonomy", False)
     if balance_viral and (viral_tax_path is None or not viral_tax_path.exists()):
         raise SystemExit("--balance-viral-by-taxonomy requires --viral-taxonomy PATH to an existing JSON file.")
-    count = build_metagenome(
-        args.input,
-        out_path,
-        args.sequence_length,
-        reads_per_organism,
+    embed_tax = getattr(args, "embed_taxonomy", False)
+    if embed_tax and viral_tax_path is None:
+        raise SystemExit("--embed-taxonomy requires --viral-taxonomy PATH (to map viral prefixes to groups).")
+    chimera_rate = getattr(args, "chimera_rate", 0.0) or 0.0
+    pcr_dup_rate = getattr(args, "pcr_duplicate_rate", 0.0) or 0.0
+    if not 0.0 <= chimera_rate <= 1.0:
+        raise SystemExit("--chimera-rate must be between 0 and 1")
+    if not 0.0 <= pcr_dup_rate <= 1.0:
+        raise SystemExit("--pcr-duplicate-rate must be between 0 and 1")
+    if (chimera_rate > 0 or pcr_dup_rate > 0) and getattr(args, "seed", None) is None:
+        args.seed = 42
+
+    coverage = getattr(args, "coverage", None)
+    coverage_cv = getattr(args, "coverage_cv", 0.0) or 0.0
+    if coverage is not None and coverage <= 0:
+        raise SystemExit("--coverage must be > 0")
+    if coverage_cv < 0:
+        raise SystemExit("--coverage-cv must be >= 0")
+    if coverage_cv > 0 and (coverage is None):
+        raise SystemExit("--coverage-cv requires --coverage")
+    if coverage_cv > 0 and getattr(args, "seed", None) is None:
+        args.seed = 42
+
+    common_build_kwargs: dict = dict(
         min_length=min_len,
         max_length=max_len,
         contig_quality_profile=quality_profile,
@@ -1963,6 +2119,83 @@ def _run_chunk(args) -> None:
         output_fastq=getattr(args, "output_fastq", False),
         write_abundance=getattr(args, "write_abundance", False),
         random_chunk_start=getattr(args, "random_chunking", False),
+        embed_taxonomy=embed_tax,
+        chimera_rate=chimera_rate,
+        pcr_duplicate_rate=pcr_dup_rate,
+        coverage=coverage,
+        coverage_cv=coverage_cv,
+    )
+
+    if multi_lengths is not None:
+        # Multi-length mode forces fixed-length reads — variable-length kwargs
+        # are enforced None above, so we strip them to keep the wrapper clean.
+        multi_kwargs = {
+            k: v for k, v in common_build_kwargs.items()
+            if k not in ("min_length", "max_length", "contig_quality_profile")
+        }
+        results = build_metagenome_multi_length(
+            args.input,
+            out_path,
+            multi_lengths,
+            reads_per_organism,
+            **multi_kwargs,
+        )
+        for length, count, path in results:
+            print(f"Wrote {count} sequences (L={length}) to {path}")
+        return
+
+    paired = getattr(args, "paired", False)
+    if paired:
+        # Enforce paired-mode incompatibilities.
+        if min_len is not None or max_len is not None or quality_profile is not None:
+            raise SystemExit("--paired requires fixed-length reads; remove --min-contig-length/--max-contig-length/--contig-quality-profile.")
+        if getattr(args, "train_test_split", None) is not None:
+            raise SystemExit("--paired is not yet compatible with --train-test-split.")
+        if getattr(args, "filter_similar", False):
+            raise SystemExit("--paired is not yet compatible with --filter-similar.")
+        if eve_intervals is not None:
+            raise SystemExit("--paired is not yet compatible with --eve-intervals.")
+        insert_size = getattr(args, "insert_size", None) or 3 * args.sequence_length
+        insert_size_sd = getattr(args, "insert_size_sd", None)
+        if insert_size_sd is None:
+            insert_size_sd = 0.1 * insert_size
+        if insert_size < args.sequence_length:
+            raise SystemExit(f"--insert-size ({insert_size}) must be >= --sequence-length ({args.sequence_length})")
+        n_pairs, r1_path, r2_path = build_metagenome_paired(
+            args.input,
+            out_path,
+            args.sequence_length,
+            reads_per_organism,
+            insert_size=insert_size,
+            insert_size_sd=insert_size_sd,
+            seed=getattr(args, "seed", None),
+            allow_ambiguous=allow_ambiguous,
+            substitution_rate=sub_rate,
+            indel_rate=indel_r,
+            abundance_profile=abundance_profile,
+            abundance_distribution=abundance_dist,
+            viral_taxonomy_json=viral_tax_path,
+            balance_viral_by_taxonomy=balance_viral,
+            error_model=getattr(args, "error_model", None),
+            output_fastq=getattr(args, "output_fastq", False),
+            write_abundance=getattr(args, "write_abundance", False),
+            embed_taxonomy=embed_tax,
+            chimera_rate=chimera_rate,
+            pcr_duplicate_rate=pcr_dup_rate,
+            coverage=coverage,
+            coverage_cv=coverage_cv,
+            extra_viral_fasta=extra_viral,
+            cap_total_reads=getattr(args, "cap_total_reads", None),
+        )
+        print(f"Wrote {n_pairs} pairs ({2 * n_pairs} records) to {r1_path} and {r2_path}")
+        return
+
+    count = build_metagenome(
+        args.input,
+        out_path,
+        args.sequence_length,
+        reads_per_organism,
+        **common_build_kwargs,
     )
     if getattr(args, "output_fastq", False):
         out_path = out_path if out_path.suffix.lower() == ".fastq" else out_path.with_suffix(".fastq")
@@ -2057,31 +2290,118 @@ def _add_genome_pool_subparser(subparsers) -> None:
         "prepare",
         help="Sample max_* accessions from snapshot (pool_seed) and download into pool_dir; writes pool_manifest.json.",
     )
-    prep.add_argument("--accessions-file", type=Path, required=True, metavar="PATH")
-    prep.add_argument("--pool-dir", type=Path, required=True, metavar="DIR")
-    prep.add_argument("--max-bacteria", type=int, default=None, metavar="N")
-    prep.add_argument("--max-virus", type=int, default=None, metavar="N")
-    prep.add_argument("--max-archaea", type=int, default=None, metavar="N")
-    prep.add_argument("--max-plasmid", type=int, default=None, metavar="N")
-    prep.add_argument("--pool-seed", type=int, default=0, help="RNG seed for pool accession sampling. Default: 0")
+    prep.add_argument(
+        "--accessions-file",
+        type=Path,
+        required=True,
+        metavar="PATH",
+        help="Accession snapshot (JSON produced by `snapshot` or `temporal-split`) listing bacterial/viral/archaea/plasmid accessions to sample from.",
+    )
+    prep.add_argument(
+        "--pool-dir",
+        type=Path,
+        required=True,
+        metavar="DIR",
+        help="Destination directory for the shared pool. A pool_manifest.json plus per-category FASTAs will be written here; later `materialize` calls read from this directory.",
+    )
+    prep.add_argument(
+        "--max-bacteria",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Cap on bacterial accessions sampled from the snapshot into the pool. Default: no cap (all listed accessions).",
+    )
+    prep.add_argument(
+        "--max-virus",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Cap on viral accessions sampled into the pool. Default: no cap.",
+    )
+    prep.add_argument(
+        "--max-archaea",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Cap on archaeal accessions sampled into the pool. Default: no cap.",
+    )
+    prep.add_argument(
+        "--max-plasmid",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Cap on plasmid accessions sampled into the pool. Default: no cap.",
+    )
+    prep.add_argument(
+        "--pool-seed",
+        type=int,
+        default=0,
+        help="RNG seed that selects which accessions from the snapshot land in the pool. Use the same value across machines to rebuild the same pool. Default: 0.",
+    )
     prep.set_defaults(func=_run_genome_pool_prepare)
 
     mat = inner.add_parser(
         "materialize",
         help="Pick a subset of the pool for sample_seed and populate output-dir (symlinks into pool).",
     )
-    mat.add_argument("--pool-dir", type=Path, required=True, metavar="DIR")
-    mat.add_argument("--output-dir", type=Path, required=True, metavar="DIR")
-    mat.add_argument("--sample-seed", type=int, required=True, metavar="SEED")
-    mat.add_argument("--max-bacteria", type=int, default=None, metavar="N")
-    mat.add_argument("--max-virus", type=int, default=None, metavar="N")
-    mat.add_argument("--max-archaea", type=int, default=None, metavar="N")
-    mat.add_argument("--max-plasmid", type=int, default=None, metavar="N")
-    mat.add_argument("--copy", action="store_true", help="Copy FASTAs instead of symlinks")
+    mat.add_argument(
+        "--pool-dir",
+        type=Path,
+        required=True,
+        metavar="DIR",
+        help="Existing pool directory produced by `genome-pool prepare` (must contain pool_manifest.json).",
+    )
+    mat.add_argument(
+        "--output-dir",
+        type=Path,
+        required=True,
+        metavar="DIR",
+        help="Destination for the materialized subset (per-category subdirs with FASTAs or symlinks). Must differ from --pool-dir; refusing overlap prevents clobbering the pool.",
+    )
+    mat.add_argument(
+        "--sample-seed",
+        type=int,
+        required=True,
+        metavar="SEED",
+        help="RNG seed that chooses which pool accessions land in this subset. Different seeds give different reproducible replicates from the same pool.",
+    )
+    mat.add_argument(
+        "--max-bacteria",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Cap on bacterial accessions materialized into the subset. Default: no cap (take every bacterial entry in the pool).",
+    )
+    mat.add_argument(
+        "--max-virus",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Cap on viral accessions materialized into the subset. Default: no cap.",
+    )
+    mat.add_argument(
+        "--max-archaea",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Cap on archaeal accessions materialized into the subset. Default: no cap.",
+    )
+    mat.add_argument(
+        "--max-plasmid",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Cap on plasmid accessions materialized into the subset. Default: no cap.",
+    )
+    mat.add_argument(
+        "--copy",
+        action="store_true",
+        help="Copy FASTAs into --output-dir instead of symlinking them (useful when the consumer cannot follow symlinks; costs extra disk).",
+    )
     mat.add_argument(
         "--no-clean",
         action="store_true",
-        help="Do not delete output-dir before writing (may leave stale symlinks)",
+        help="Do not delete --output-dir before writing. Leaves stale FASTAs from a previous seed behind; omit unless you know the dir only contains reusable artefacts.",
     )
     mat.set_defaults(func=_run_genome_pool_materialize)
 
@@ -2200,6 +2520,17 @@ def _run_pipeline(args) -> None:
     min_len = getattr(args, "min_contig_length", None)
     max_len = getattr(args, "max_contig_length", None)
     quality_profile = getattr(args, "contig_quality_profile", None)
+    multi_length_spec = getattr(args, "multi_length", None)
+    multi_lengths: list[int] | None = None
+    if multi_length_spec is not None:
+        try:
+            multi_lengths = parse_multi_length_spec(multi_length_spec)
+        except ValueError as exc:
+            raise SystemExit(f"--multi-length: {exc}") from exc
+        if quality_profile is not None or min_len is not None or max_len is not None:
+            raise SystemExit("--multi-length cannot be combined with --min-contig-length/--max-contig-length/--contig-quality-profile")
+        if getattr(args, "train_test_split", None) is not None:
+            raise SystemExit("--multi-length cannot be combined with --train-test-split (run splits per length separately).")
     if quality_profile is not None and (min_len is not None or max_len is not None):
         raise SystemExit("--contig-quality-profile cannot be combined with --min-contig-length/--max-contig-length")
     use_variable = quality_profile is not None or (min_len is not None and max_len is not None)
@@ -2253,6 +2584,119 @@ def _run_pipeline(args) -> None:
     balance_viral = getattr(args, "balance_viral_by_taxonomy", False)
     if balance_viral and (viral_tax_path is None or not viral_tax_path.exists()):
         raise SystemExit("--balance-viral-by-taxonomy requires --viral-taxonomy PATH to an existing JSON file.")
+    embed_tax = getattr(args, "embed_taxonomy", False)
+    if embed_tax and (viral_tax_path is None or not viral_tax_path.exists()):
+        raise SystemExit("--embed-taxonomy requires --viral-taxonomy PATH to an existing JSON file.")
+    chimera_rate = getattr(args, "chimera_rate", 0.0) or 0.0
+    pcr_dup_rate = getattr(args, "pcr_duplicate_rate", 0.0) or 0.0
+    if not 0.0 <= chimera_rate <= 1.0:
+        raise SystemExit("--chimera-rate must be between 0 and 1")
+    if not 0.0 <= pcr_dup_rate <= 1.0:
+        raise SystemExit("--pcr-duplicate-rate must be between 0 and 1")
+    if (chimera_rate > 0 or pcr_dup_rate > 0) and getattr(args, "seed", None) is None:
+        args.seed = 42
+
+    coverage = getattr(args, "coverage", None)
+    coverage_cv = getattr(args, "coverage_cv", 0.0) or 0.0
+    if coverage is not None and coverage <= 0:
+        raise SystemExit("--coverage must be > 0")
+    if coverage_cv < 0:
+        raise SystemExit("--coverage-cv must be >= 0")
+    if coverage_cv > 0 and (coverage is None):
+        raise SystemExit("--coverage-cv requires --coverage")
+    if coverage_cv > 0 and getattr(args, "seed", None) is None:
+        args.seed = 42
+
+    if multi_lengths is not None:
+        # Pipeline multi-length: no train/test (validated up top), no similarity
+        # refill (each length would need its own filter anyway), no return_records.
+        multi_kwargs: dict = dict(
+            seed=getattr(args, "seed", None),
+            cap_total_reads=getattr(args, "cap_total_reads", None),
+            eve_intervals=eve_intervals,
+            filter_similar=filter_similar,
+            similarity_threshold=getattr(args, "similarity_threshold", 90.0),
+            similarity_min_coverage=getattr(args, "similarity_min_coverage", 0.8),
+            oversample_factor=getattr(args, "oversample_factor", 2.0),
+            similarity_work_dir=base / ".simfilter_work",
+            allow_ambiguous=allow_ambiguous,
+            substitution_rate=sub_rate,
+            indel_rate=indel_r,
+            extra_viral_fasta=extra_viral,
+            abundance_profile=abundance_profile,
+            abundance_distribution=abundance_dist,
+            viral_taxonomy_json=viral_tax_path,
+            balance_viral_by_taxonomy=balance_viral,
+            error_model=getattr(args, "error_model", None),
+            output_fastq=getattr(args, "output_fastq", False),
+            write_abundance=getattr(args, "write_abundance", False),
+            random_chunk_start=getattr(args, "random_chunking", False),
+            embed_taxonomy=embed_tax,
+            chimera_rate=chimera_rate,
+            pcr_duplicate_rate=pcr_dup_rate,
+            coverage=coverage,
+            coverage_cv=coverage_cv,
+        )
+        results = build_metagenome_multi_length(
+            download_dir,
+            out_path,
+            multi_lengths,
+            reads_per_organism,
+            **multi_kwargs,
+        )
+        for length, count, path in results:
+            plog.info("Multi-length: wrote %d sequences (L=%d) to %s", count, length, path)
+            print(f"Wrote {count} sequences (L={length}) to {path}")
+        plog.info("Pipeline finished. Log file: %s", log_file.resolve())
+        return
+
+    paired = getattr(args, "paired", False)
+    if paired:
+        if min_len is not None or max_len is not None or quality_profile is not None:
+            raise SystemExit("--paired requires fixed-length reads; remove --min-contig-length/--max-contig-length/--contig-quality-profile.")
+        if do_train_test_split:
+            raise SystemExit("--paired is not yet compatible with --train-test-split.")
+        if filter_similar:
+            raise SystemExit("--paired is not yet compatible with --filter-similar.")
+        if eve_intervals is not None:
+            raise SystemExit("--paired is not yet compatible with --run-blastn-filter.")
+        insert_size = getattr(args, "insert_size", None) or 3 * args.sequence_length
+        insert_size_sd = getattr(args, "insert_size_sd", None)
+        if insert_size_sd is None:
+            insert_size_sd = 0.1 * insert_size
+        if insert_size < args.sequence_length:
+            raise SystemExit(f"--insert-size ({insert_size}) must be >= --sequence-length ({args.sequence_length})")
+        n_pairs, r1_path, r2_path = build_metagenome_paired(
+            download_dir,
+            out_path,
+            args.sequence_length,
+            reads_per_organism,
+            insert_size=insert_size,
+            insert_size_sd=insert_size_sd,
+            seed=getattr(args, "seed", None),
+            allow_ambiguous=allow_ambiguous,
+            substitution_rate=sub_rate,
+            indel_rate=indel_r,
+            abundance_profile=abundance_profile,
+            abundance_distribution=abundance_dist,
+            viral_taxonomy_json=viral_tax_path,
+            balance_viral_by_taxonomy=balance_viral,
+            error_model=getattr(args, "error_model", None),
+            output_fastq=getattr(args, "output_fastq", False),
+            write_abundance=getattr(args, "write_abundance", False),
+            embed_taxonomy=embed_tax,
+            chimera_rate=chimera_rate,
+            pcr_duplicate_rate=pcr_dup_rate,
+            coverage=coverage,
+            coverage_cv=coverage_cv,
+            extra_viral_fasta=extra_viral,
+            cap_total_reads=getattr(args, "cap_total_reads", None),
+        )
+        plog.info("Paired-end: wrote %d pairs to %s and %s", n_pairs, r1_path, r2_path)
+        print(f"Wrote {n_pairs} pairs ({2 * n_pairs} records) to {r1_path} and {r2_path}")
+        plog.info("Pipeline finished. Log file: %s", log_file.resolve())
+        return
+
     result = build_metagenome(
         download_dir,
         out_path,
@@ -2282,6 +2726,11 @@ def _run_pipeline(args) -> None:
         output_fastq=getattr(args, "output_fastq", False),
         write_abundance=getattr(args, "write_abundance", False),
         random_chunk_start=getattr(args, "random_chunking", False),
+        embed_taxonomy=embed_tax,
+        chimera_rate=chimera_rate,
+        pcr_duplicate_rate=pcr_dup_rate,
+        coverage=coverage,
+        coverage_cv=coverage_cv,
     )
     output_fastq_flag = getattr(args, "output_fastq", False)
     if do_train_test_split:
@@ -2469,7 +2918,7 @@ def _run_temporal_pipeline(args) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="CHIMERA — Configurable Hybrid In-silico Metagenome Emulator for Read Analysis. Commands: download, snapshot, chunk, pipeline, blastn-filter, build-viral-db, genome-pool, viral-taxonomy, temporal-split, temporal-split-info, temporal-split-search, temporal-pipeline, split-metagenome-train-test, filter-test-against-train, benchmark-recipe, fetch-biome-data, biome-metagenome, biome-dataset-pipeline",
+        description="CHIMERA — Configurable Hybrid In-silico Metagenome Emulator for Read Analysis. Commands: download, snapshot, migrate-snapshot, chunk, pipeline, blastn-filter, build-viral-db, genome-pool, viral-taxonomy, temporal-split, temporal-split-info, temporal-split-search, temporal-pipeline, split-metagenome-train-test, filter-test-against-train, benchmark-recipe, fetch-biome-data, biome-metagenome, biome-dataset-pipeline",
     )
     subparsers = parser.add_subparsers(dest="command")
     subparsers.required = True
